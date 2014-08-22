@@ -6,7 +6,7 @@ RDKit integration to SQLAlchemy
 Example Usage
 =============
 
-
+```python
     from sqlalchemy import (ceate_engine, Column, Integer, String, ForeignKey)
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.ext.declarative import declarative_base
@@ -91,3 +91,4 @@ Example Usage
     
     for substance in tenbenz:
         print substance.sub_id, substance.smarts
+```
