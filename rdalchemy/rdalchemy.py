@@ -6,9 +6,10 @@
 # This implementation utilizes code and methods from Riccardo Vianello
 # as well as code structure and inspiration from geoalchemy2
 
+import contextlib
+import types
 
 import numpy as np
-import types
 
 from sqlalchemy import event, Table
 from sqlalchemy.ext.compiler import compiles
@@ -826,6 +827,13 @@ class GUC(expression.Executable, expression.ClauseElement):
     def get(self):
         query = 'SHOW {variable}'.format(variable=variable)
         return expression.text(query)
+
+    @contextlib.contextmanager
+    def __call__(self, value):
+        original = self.get()
+        self.set(value)
+        yield original
+        self.set(original)
 
 
 @compiles(GUC)
