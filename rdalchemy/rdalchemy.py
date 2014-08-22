@@ -1,4 +1,11 @@
 #!/usr/bin/env python
+#
+# Copyright (C) 2014 Teague Sterling, John Irwin,
+# Regents of the University of California
+#
+# This implementation utilizes code and methods from Riccardo Vianello
+# as well as code structure and inspiration from geoalchemy2
+
 
 import numpy as np
 import types
