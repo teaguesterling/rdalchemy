@@ -245,9 +245,17 @@ BFP_PARSERS = [
     # TODO: base64, etc.
 ]
 
-def attempt_bfp_conversion(data, size=None):
+def attempt_bfp_conversion(data, size=None, method=None):
     if isinstance(data, (basestring, buffer)):
         data = str(data)
+
+    # Special case for mol elements
+    if isinstance(data, Chem.Mol):
+        if method is not None:
+            data = method(data)
+        else:
+            raise ValueError("Attempting to generate bfp from Mol "
+                             "but no method provided")
         
     errors = []
     
@@ -508,12 +516,14 @@ class BfpElement(_RDKitDataElement, expression.Function):
     backend_in = 'bfp_from_binary_text'
     backend_out = 'bfp_to_binary_text'
 
-    def __init__(self, fp, size_=None):
+    def __init__(self, fp, size_=None, method_):
         _RDKitDataElement.__init__(self, fp)
         self._size = size_
+        self._method = method_
         self._fp = None
         expression.Function.__init__(self, self.backend_in, self.desc,
-                                           type_=Bfp(size=self._size))
+                                           type_=Bfp(size=self._size,
+                                                     method=self._method))
     
     def compile_desc_literal(self):
         return self.as_binary_text
@@ -525,7 +535,9 @@ class BfpElement(_RDKitDataElement, expression.Function):
     @property
     def as_bfp(self):
         if self._fp is None:
-            self._fp = coerse_to_bfp(self.data, size=self._size)
+            self._fp = coerse_to_bfp(self.data, 
+                                     size=self._size,
+                                     method=self._method)
         return self._fp
     
     @property
@@ -656,9 +668,12 @@ class BinaryMol(Mol):
 class Bfp(UserDefinedType):
     name = 'bfp'
     element = BfpElement
+    size = None
+    method = None
     
-    def __init__(self, size=None):
-        self.size = size
+    def __init__(self, size=None, method=None):
+        self.size = size or self.size
+        self.method = method or self.method
     
     class comparator_factory(UserDefinedType.Comparator):
         
@@ -687,7 +702,9 @@ class Bfp(UserDefinedType):
         return self.name
     
     def bind_expression(self, bindvalue):
-        element = self.element(bindvalue, size_=self.size)
+        element = self.element(bindvalue, 
+                               size_=self.size, 
+                               method_self.method)
         return element
     
     def column_expression(self, col):
