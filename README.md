@@ -79,7 +79,8 @@ Example Usage
     print aspirin.smiles
     print aspirin.structure.as_pdb
     
-    similar = db.query(Substance).join(Fingerprint).filter(Fingerprint.similar_to(aspirin))
+    similar = db.query(Substance).join(Fingerprint)\
+                .filter(Fingerprint.similar_to(aspirin))
     with tanimoto_threshold(.7):
         for similar_substance in similar:
             print similar_substance.smiles, similar_substance.sub_id
