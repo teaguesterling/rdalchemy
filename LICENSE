@@ -1,6 +1,10 @@
 The MIT License (MIT)
 
-Copyright (c) 2014 Teague Sterling
+Copyright (c) 2014 Teague Sterling, John Irwin, R
+egents of the University of California
+
+This implementation utilizes code and methods from Riccardo Vianello
+as well as code structure and inspiration from geoalchemy2.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
