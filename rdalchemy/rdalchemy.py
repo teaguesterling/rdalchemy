@@ -7,6 +7,8 @@
 # as well as code structure and inspiration from geoalchemy2
 
 import contextlib
+import functools
+import operator
 import types
 
 import numpy as np
@@ -18,6 +20,7 @@ from sqlalchemy.types import UserDefinedType, _Binary, TypeDecorator
 from sqlalchemy.dialects.postgresql.base import ischema_names
 
 from rdkit import Chem, DataStructs
+from rdkit.Chem import Descriptors
 
 
 ## Datatype Converstions
@@ -271,8 +274,8 @@ def attempt_bfp_conversion(data, size=None, method=None):
             errors.append(str(error))
     raise ValueError("Failed to convert `{0}` to bfp. Errors were: {1}".format(data, ", ".join(errors)))
     
-def coerse_to_bfp(data, size=None):
-    fmt, bfp = attempt_bfp_conversion(data, size=size)
+def coerse_to_bfp(data, size=None, method=None):
+    fmt, bfp = attempt_bfp_conversion(data, size=size, method=None)
     return bfp
 
 
@@ -282,70 +285,110 @@ def coerse_to_bfp(data, size=None):
 ## Consult geoalchemy2 and razi for possible solutions
 
 
-class _RDKitType(UserDefinedType):
-    def __getattr__(self, name):
-        print name
-
-
 class _RDKitFunction(functions.GenericFunction):
+    HELP = 'See http://www.rdkit.org/docs/Cartridge.html'
     
     def __init__(self, *args, **kwargs):
-        expr = kwargs.pop('expr', None)
-        if expr is not None:
+        try:
+            expr = kwargs.pop('expr')
             args = (expr,) + args
-        super(RDKitFunction, self).__init__(*args, **kwargs)
-
-    FN_NAME_PREFIX = "rdkit_"
-    HELP_URL = 'See http://www.rdkit.org/docs/Cartridge.html'
-
-    @classmethod
-    def define(cls, 
-               psql_name, 
-               local_fn=None,
-               type_=None, 
-               help="", 
-               register=True):
-
-        attributes = {
-            'name': name,
-            'local_function': local_fn,
-        }
-        docs = [help, cls.HELP_URL]
-
-        if type_ is not None:
-            attributes['type'] = type_
-            type_str = type_.__module__ + '.' + type_.__name__
-
-        attributes['__doc__'] = "\n\n".join(docs)
-
-        cls_name = name
-        sub_cls = type(cls_name, (cls,), attributes)
-
-        if register:
-            globals()[cls_name] = sub_cls
-
-        return sub_cls
+        except KeyError:
+            pass
+        super(_RDKitFunction, self).__init__(*args, **kwargs)
 
 
-class _RDKitFunctionCollection(object):
-    @classmethod
-    def _inject(cls, target):
-        fns = [name for name in dir(cls) if not name.startswith('_')]
-        for fn_local_name in fns:
-            fn = getattr(cls, fn_local_name)
-            attr = cls._make_function_attribute(fn, target)
-            setattr(target, fn_local_name, attr)
-            
-    @classmethod
-    def _make_function_attribute(cls, fn, target):
-        def wrapper(self):
-            func_gen = functions._FunctionGenerator(expr=self)
-            func_ = getattr(func_gen, fn.name)
-            return func_
-        method = types.MethodType(wrapper, None, target)
-        attribute = property(method)
-        return attribute
-        
+def _hybrid_function(sql_function, local_function, 
+                     type_=None, 
+                     local_in_type=None,
+                     sql_cast_out=None,
+                     help="", tpl=functions.GenericFunction,
+                     register=True):
+    attributes = {
+        'name': sql_function,
+        'local_function': staticmethod(local_function),
+        '_sql_cast_out': sql_cast_out,
+        '_local_in_type': local_in_type,
+    }
+
+    docs = [help]
+    docs.append(getattr(tpl, 'HELP', ''))
+
+    if type_ is not None:
+        type_str = ".".join((type_.__module__, type_.__name__))
+        docs.append("Return Type: {type}".format(type=type_str))
+        attributes['type'] = type_
+
+    attributes['__doc__'] = "\n\n".join(docs)
+
+    cls_name = sql_function
+    cls = type(cls_name, (tpl,), attributes)
+
+    if register:
+        globals()[cls_name] = cls
+
+    return cls
+
+
+def _rdkit_function(sql_function, local_function, 
+                    type_=None, sql_cast_out=None,
+                    help="", register=True):
+    return _hybrid_function(sql_function, local_function, 
+                            type_=type_, sql_cast_out=sql_cast_out,
+                            tpl=_RDKitFunction,
+                            help=help, register=register)
+
+
+@compiles(_RDKitFunction)
+def _compile_rdkit_function(element, compiler, **kwargs):
+    compiled = compiler.visit_function(element)
+    if element._sql_cast_out is not None:
+        compiled = "{call}::{cast}".format(call=compiled, 
+                                           cast=element._sql_cast_out)
+    return compiled
+
+
+
+class _RDKitFunctionCallable(object):
+
+    @property
+    def _functions(self):
+        return getattr(self, '_function_namespace', functions._FunctionGenerator)
+
+    def _get_function(self, fn_name):
+        fn = getattr(self._functions, fn_name)
+        return fn
+
+    def _can_call_function_locally(self, fn_name):
+        return hasattr(self._get_function(fn_name), 'local_function')
+
+    def _function_call(self, fn_name, data=None):
+        if data is None:
+            data = self
+        fn = self._get_function(fn_name)
+        return fn(expr=data)
+
+
+def instrumented_property(name):
+    def fn(self, *args, **kwargs):
+        return self._instrumented_target(name, *args, **kwargs)
+    return property(fn)
+
+    
+class _RDKitInstrumentedFunctions(object):
+    def _instrumented_target(self, name, data=None, *args, **kwargs):
+        return self._function_call(name, data)
+
+
+class RDKitInstrumentedColumnClass(object):
+    @property
+    def __object_data_column__(self):
+        raise NotImplemented("_target column not set for {:r}".format(self))
+
+    def _instrumented_target(self, name, *args, **kwargs):
+        target = getattr(self, self.__object_data_column__)
+        value = getattr(target, name)
+        return value
+
 
 class _RDKitElement(object):
 
@@ -354,32 +397,30 @@ class _RDKitElement(object):
     def __repr__(self):
         return "<%s at 0x%x; %r>" % (self.__class__.__name__,
                                         id(self), self.desc)
-    
 
-class _RDKitDataElement(_RDKitElement):
+
+class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumentedFunctions):
     """ Base datatype for object that need explicit modification
         either into or out of psql.
         Define "compile_desc_literal" to convert
     """
-    
-    @classmethod
-    def _assign_function_object(cls, fns):
-        cls._functions = {}
-        fn_names = [fn for fn in dir(fns) if not fn.startswith('_')]
-        for fn_name in fn_names:
-            fn = getattr(fns, fn_name)
-            cls._functions[fn_name] = fn
-    
     def __init__(self, data):
         self.data = data
 
-    def _function_call(self, fn_name):
-        fn = self._functions[fn_name]
-        if isinstance(self.data, expression.BindParameter):
-            return fn(self.data)
-        else:
-            local = fn.local_function
-            
+    def _function_call(self, fn_name, data=None):
+        if data is not None:
+            raise ValueError("Cannot call bound RDKit function with additional data")
+
+        if isinstance(self.data, (expression.BindParameter, 
+                                  expression.ColumnElement)):
+            return super(_RDKitDataElement, self)\
+                        ._function_call(fn_name, data=self.desc)
+        elif self._can_call_function_locally(fn_name):
+            fn = self._get_function(fn_name)()
+            return fn.local_function(self.to_local_type())
+
+    def __getattr__(self, name):
+        return self._function_call(name)
         
     @property
     def desc(self):
@@ -391,22 +432,56 @@ class _RDKitDataElement(_RDKitElement):
     def compile_desc_literal(self):
         raise NotImplemented
 
+    def to_local_type(self):
+        raise NotImplemented
+
 
 ## Mol element interface.
 ## Either implicit (punt to postgres) or explicit (define functions
 ## to perfrom in/out conversions)
 
 
-class RawMolElement(_RDKitDataElement):
+class RDKitMolProperties(object):
+    @property
+    def _function_namespace(self):
+        return _RDKitMolFunctions
+    
+    mwt = instrumented_property('mwt')
+    logp = instrumented_property('logp')
+    tpsa = instrumented_property('tpsa') 
+    hba = instrumented_property('hba') 
+    hbd = instrumented_property('hbd') 
+    num_atoms = instrumented_property('num_atoms')
+    num_heavy_atoms = instrumented_property('num_heavy_atoms')
+    num_rotatable_bonds = instrumented_property('num_rotatable_bonds')
+    num_hetero_atoms = instrumented_property('num_hetero_atoms')
+    num_rings = instrumented_property('num_rings')
+    inchi = instrumented_property('inchi')
+    inchi_key = instrumented_property('inchi_key')
+
+
+class RDKitBfpProperties(object):
+    @property
+    def _function_namespace(self):
+        return _RDKitBfpFunctions
+    
+    size = instrumented_property('size')
+
+
+class RawMolElement(_RDKitDataElement, RDKitMolProperties):
     """ Base mol element. Let postgres deal with it. 
         Also define explicit conversion methods for mols"""
+
     def __init__(self, mol, _force_sanitized=True):
         _RDKitDataElement.__init__(self, mol)
         self._mol = None
         self.force_sanitized = _force_sanitized
-    
+
     def compile_desc_literal(self):
         return self.mol_cast(self.data)
+
+    def to_local_type(self):
+        return self.as_mol
     
     @staticmethod
     def mol_cast(self, value):
@@ -462,7 +537,7 @@ class _ExplicitMolElement(RawMolElement, expression.Function):
         
     @property
     def backend_in(self): 
-        raise NotImplemented
+        raise NotImplementedError
         
     @property
     def backend_out(self): 
@@ -512,12 +587,12 @@ class CtabMolElement(_ExplicitMolElement):
 ## Handle conversion from various formats (some RDKit based and others)
 
 
-class BfpElement(_RDKitDataElement, expression.Function):
+class BfpElement(_RDKitDataElement, expression.Function, RDKitBfpProperties):
     
     backend_in = 'bfp_from_binary_text'
     backend_out = 'bfp_to_binary_text'
 
-    def __init__(self, fp, size_=None, method_):
+    def __init__(self, fp, size_=None, method_=None):
         _RDKitDataElement.__init__(self, fp)
         self._size = size_
         self._method = method_
@@ -525,13 +600,12 @@ class BfpElement(_RDKitDataElement, expression.Function):
         expression.Function.__init__(self, self.backend_in, self.desc,
                                            type_=Bfp(size=self._size,
                                                      method=self._method))
-    
+
     def compile_desc_literal(self):
         return self.as_binary_text
-    
-    @property
-    def size(self):
-        return self.as_bfp.GetNumBits()
+
+    def to_local_type(self):
+        return self.as_bfp
     
     @property
     def as_bfp(self):
@@ -566,12 +640,38 @@ class BfpElement(_RDKitDataElement, expression.Function):
         return self.as_bytes
 
 
-## SQLAlchemy data types
+class _RDKitComparator(UserDefinedType.Comparator, _RDKitFunctionCallable):
+    key = None
+    _element = None
+
+    def _function_call(self, name, data=None):
+        if data is not None:
+            raise ValueError("Cannot call bound RDKit function with additional data")
+        return super(_RDKitComparator, self)\
+                    ._function_call(name, data=self.expr)
+
+    def _should_cast(self, obj):
+        return self._element is not None\
+               and not isinstance(obj, self._element)
+
+    def _cast_other_element(self, obj):
+        raise NotImplemented
+
+    @staticmethod
+    def _ensure_other_element(fn):
+        @functools.wraps(fn)
+        def wrapper(self, other):
+            other = self._cast_other_element(other)
+            return fn(self, other)
+        return wrapper
 
 
-class Mol(UserDefinedType):
-    name = 'mol'
-    
+class _RDKitMolComparator(_RDKitComparator, 
+                          _RDKitInstrumentedFunctions, 
+                          RDKitMolProperties):
+    _element = RawMolElement
+    force_sanitize = False
+
     COERSIONS = {
         'smiles': SmilesMolElement,
         'smarts': SmartsMolElement,
@@ -581,48 +681,68 @@ class Mol(UserDefinedType):
         # Special Case Explicit Mol Elements
         'mol': BinaryMolElement,
     }
+
+    @property
+    def _sanitize(self):
+        try:
+            return self.sanitized
+        except AttributeError:
+            return self.force_sanitize
+
+    def _cast_other_element(self, obj):
+        if self._should_cast(obj):
+            fmt = infer_mol_format(obj, sanitize=self._sanitize)
+            convert = self.COERSIONS.get(fmt, RawMolElement)
+            other = convert(obj, _force_sanitized=self._sanitize)
+        else:
+            other = obj
+        return other
+
+    @_RDKitComparator._ensure_other_element
+    def structure_is(self, other):
+        return self.op('@=')(other)
+
+    @_RDKitComparator._ensure_other_element
+    def has_substructure(self, other):
+        return self.op('@>')(other)
+
+    @_RDKitComparator._ensure_other_element
+    def in_superstructure(self, other):
+        return self.op('<@')(other)
+
+    def contains(self, other, escape=None):
+        return self.has_substructure(other)
+
+    def contained_in(self, other):
+        return self.in_superstructure(other)
+        
+    def __eq__(self, other):
+        return self.structure_is(other)
+
+    def __contains__(self, other):
+        return self.has_substructure(other)
+        
+    def __getitem___(self, other):
+        return self.has_substructure(other)
+
+
+## SQLAlchemy data types
+
+
+class Mol(UserDefinedType):
+    name = 'mol'
     
     def __init__(self, coerse_='smiles', sanitized_=True):
         self.coerse = coerse_
         self.sanitized = sanitized_
 
-    class comparator_factory(UserDefinedType.Comparator):
-        force_sanitize = False
-        
-        def _get_other_element(self, other):
-            if not isinstance(other, RawMolElement):
-                sanitize = self.force_sanitize
-                fmt = infer_mol_format(other, sanitize=sanitize)
-                element_type = Mol.COERSIONS.get(fmt, RawMolElement)
-                other = element_type(other, _force_sanitized=sanitize)
-            return other
-        
-        def structure_is(self, other):
-            other_element = self._get_other_element(other)
-            return self.op('@=')(other_elemenet)
-        
-        def has_substructure(self, other):
-            other_element = self._get_other_element(other)
-            return self.op('@>')(other_element)
-        
-        def in_superstructure(self, other):
-            other_element = self._get_other_element(other)
-            return self.op('<@')(other_element)
-        
-        def contains(self, other, **kwargs):
-            return self.has_substructure(other)
-        
-        def __contains__(self, other):
-            return self.has_substructure(other)
-        
-        def __getitem___(self, other):
-            return self.has_substructure(other)
-        
+    comparator_factory = _RDKitMolComparator
+
     def _coerse_compared_value(self, op, value):
         return self
     
     def _get_coersed_element(self, default=None):
-        return self.COERSIONS.get(self.coerse, default)
+        return self.comparator_factory.COERSIONS.get(self.coerse, default)
     
     def get_col_spec(self):
         return self.name
@@ -666,38 +786,67 @@ class BinaryMol(Mol):
                                         sanitized_=sanitized_)
 
 
+class _RDKitBfpComparator(_RDKitComparator, RDKitBfpProperties):
+    _element = BfpElement
+    default_coefficient = 'tanimoto'
+
+    @property
+    def active_coefficient(self):
+        try:
+            return self.coefficient
+        except AttributeError:
+            return self.default_coefficient
+
+    def _cast_other_element(self, obj):
+        if self._should_cast(obj):
+            size = getattr(self, 'size', None)
+            method = getattr(self, 'method', None)
+            other = coerse_to_bfp(obj, size=size, method=method)
+        else:
+            other = obj
+        return other
+
+    @_RDKitComparator._ensure_other_element
+    def tanimoto_similar(self, other):
+        return self % other_element
+    
+    @_RDKitComparator._ensure_other_element
+    def dice_similar(self, other):
+        return self.op('#')(other_element)
+    
+    @_RDKitComparator._ensure_other_element
+    def tanimoto_nearest_neighbors(self, other):
+        return self.op('<%>')(other_element)
+
+    @_RDKitComparator._ensure_other_element
+    def dice_nearest_neighbors(self, other):
+        return self.op('<#>')(other_element)
+
+    def similar_to(self, other):
+        coeff = self.active_coefficient
+        other_element = self._get_other_element(other)
+        similarity_fn = "{0}_similar".format(coeff)
+        return getattr(self, similarity_fn)(other_element)
+
+    def most_similar(self, other):
+        coeff = self.active_coefficient
+        other_element = self._get_other_element(coeff)
+        similarity_fn = "{0}_nearest_neighbors".format(default)
+        return getattr(self, similarity_fn)(other_element)
+
+
 class Bfp(UserDefinedType):
     name = 'bfp'
     element = BfpElement
     size = None
     method = None
+
+    comparator_factory = _RDKitBfpComparator
     
-    def __init__(self, size=None, method=None):
+    def __init__(self, size=None, method=None, coefficient='tanimoto'):
         self.size = size or self.size
         self.method = method or self.method
-    
-    class comparator_factory(UserDefinedType.Comparator):
-        
-        default_similarity = 'tanimoto'
-        
-        def _get_other_element(self, other):
-            if not isinstance(other, Bfp.element):
-                other = Bfp.element(coerse_to_bfp(other))
-            return other
-        
-        def tanimoto_similar(self, other):
-            other_element = self._get_other_element(other)
-            return self % other_element
-        
-        def dice_similar(self, other):
-            other_element = self._get_other_element(other)
-            return self.op('#')(other_element)
-        
-        def similar_to(self, other):
-            default = self.default_similarity
-            other_element = self._get_other_element(other)
-            similarity_fn = "{0}_similar".format(default)
-            return getattr(self, similarity_fn)(other_element)
+        self.coefficient = coefficient
     
     def get_col_spec(self):
         return self.name
@@ -705,7 +854,7 @@ class Bfp(UserDefinedType):
     def bind_expression(self, bindvalue):
         element = self.element(bindvalue, 
                                size_=self.size, 
-                               method_self.method)
+                               method_=self.method)
         return element
     
     def column_expression(self, col):
@@ -729,93 +878,131 @@ class Bfp(UserDefinedType):
                 return None
         return process
 
+    def __getattr__(self, name):
+        return getattr(functions, name)(self)
+
 ## TODO: Fix these to be accessible as attributes of Mol/BFP objects
 ##       as well as elements. Will need to also define the 'local' 
 ##       equivalents of each function to make mol weight computable
 ##       in the same way without touching the database.
 
 
-#class _RDKit_Mol_Functions(_RDKitFunctionCollection):
-#    # Descriptors
-#    amw = _RDKitFunction.define('mol_amw', Mol,
-#                               "Returns the AMW for a molecule.")
-#    logp = _RDKitFunction.define('mol_logp', Mol,
-#                                "Returns the LogP for a molecule.")
-#    tpsa = _RDKitFunction.define('mol_tpsa', Mol,
-#                                "Returns the topological polar "
-#                                "surface  area for a molecule.")
-#    hba = _RDKitFunction.define('mol_hba', Mol,
-#                               "Returns the number of Lipinski "
-#                               "H-bond acceptors for a molecule")
-#    hbd = _RDKitFunction.define('mol_hbd', Mol,
-#                               "Returns the number of Lipinski "
-#                               "H-bond donors for a molecule")
-#    num_atoms = _RDKitFunction.define('mol_numatoms', Mol,
-#                               "Returns the number of atoms in "
-#                               "a molecule")
-#    num_heavy_atoms = _RDKitFunction.define('mol_numheavyatoms', Mol,
-#                               "Returns the number of heavy atoms "
-#                               "in a molecule")
-#    num_rotatable_bonds = _RDKitFunction.define('mol_numrotatablebonds', Mol,
-#                               "Returns the number of rotatable "
-#                               "bonds in a molecule")
-#    num_hetero_atoms = _RDKitFunction.define('mol_numheteroatoms', Mol,
-#                               "Returns the number of heteroatoms "
-#                               "in a molecule")
-#    num_rings = _RDKitFunction.define('mol_numrings', Mol,
-#                               "Returns the number of rings "
-#                               "in a molecule")
-#    num_aromatic_rings = _RDKitFunction.define('mol_numaromaticrings', Mol,
+class _RDKitMolFunctions(object):
+    # Descriptors
+    mwt = _rdkit_function(
+                'mol_amw', 
+                Descriptors.MolWt,
+                help="Returns the AMW for a molecule.")
+    logp = _rdkit_function(
+                'mol_logp', 
+                Descriptors.MolLogP,
+                help="Returns the LogP for a molecule.")
+    tpsa = _rdkit_function(
+                'mol_tpsa', 
+                Descriptors.TPSA,
+                help="Returns the topological polar surface  area for a "
+                     "molecule.")
+    hba = _rdkit_function(
+                'mol_hba', 
+                Descriptors.NumHAcceptors,
+                help="Returns the number of Lipinski H-bond acceptors for a "
+                     "molecule")
+    hbd = _rdkit_function(
+                'mol_hbd', 
+                Descriptors.NumHDonors,
+                help="Returns the number of Lipinski H-bond donors for a "
+                     "molecule")
+    num_atoms = _rdkit_function(
+                'mol_numatoms', 
+                Chem.Mol.GetNumAtoms,
+                help="Returns the number of atoms in a molecule")
+    num_heavy_atoms = _rdkit_function(
+                'mol_numheavyatoms', 
+                Chem.Mol.GetNumHeavyAtoms,
+                help="Returns the number of heavy atoms in a molecule")
+    num_rotatable_bonds = _rdkit_function(
+                'mol_numrotatablebonds', 
+                Descriptors.NumRotatableBonds,
+                help="Returns the number of rotatable bonds in a molecule")
+    num_hetero_atoms = _rdkit_function(
+                'mol_numheteroatoms', 
+                Descriptors.NumHeteroatoms,
+                help="Returns the number of heteroatoms in a molecule")
+    num_rings = _rdkit_function(
+                'mol_numrings', 
+                Descriptors.RingCount,
+                help="Returns the number of rings in a molecule")
+#    num_aromatic_rings = _rdkit_function('mol_numaromaticrings', Mol,
 #                               "Returns the number of aromatic rings "
 #                               "in a molecule")
-#    num_aliphatic_rings = _RDKitFunction.define('mol_numaliphaticrings', Mol,
+#    num_aliphatic_rings = _rdkit_function('mol_numaliphaticrings', Mol,
 #                               "Returns the number of aliphatic rings "
 #                               "in a molecule")
-#    num_saturated_rings = _RDKitFunction.define('mol_numsaturatedrings', Mol,
+#    num_saturated_rings = _rdkit_function('mol_numsaturatedrings', Mol,
 #                               "Returns the number of saturated rings "
 #                               "in a molecule")
-#    num_saturated_rings = _RDKitFunction.define('mol_numsaturatedrings', Mol,
+#    num_saturated_rings = _rdkit_function('mol_numsaturatedrings', Mol,
 #                               "Returns the number of saturated rings "
 #                               "in a molecule")
-#    num_aromaticheterocycles = _RDKitFunction.define('mol_numaromaticheterocycles', Mol,
+#    num_aromaticheterocycles = _rdkit_function('mol_numaromaticheterocycles', Mol,
 #                               "Returns the number of aromatic heterocycles "
 #                               "in a molecule")
-#    formula = _RDKitFunction.define('mol_formula', Mol,
+#    formula = _rdkit_function('mol_formula', Mol,
 #            'Returns a string with the molecular formula. The second '
 #            'argument controls whether isotope information is '
 #            'included in the formula; the third argument controls '
 #            'whether "D" and "T" are used instead of [2H] and [3H].')
 #
-#    chi0v = _RDKitFunction.define('mol_chi0v', Mol,
+#    chi0v = _rdkit_function('mol_chi0v', Mol,
 #            'Returns the ChiVx value for a molecule for X=0-4')
-#    chi0n = _RDKitFunction.define('mol_chi0n', Mol,
+#    chi0n = _rdkit_function('mol_chi0n', Mol,
 #            'Returns the ChiVx value for a molecule for X=0-4')
-#    kappa1 = _RDKitFunction.define('mol_kappa1', Mol,
+#    kappa1 = _rdkit_function('mol_kappa1', Mol,
 #            'Returns the kappaX value for a molecule for X=1-3')
-#
-#    inchi = _RDKitFunction.define('mol_inchi', Mol,
-#            'Returns an InChI for the molecule. (available '
-#            'from the 2011_06 release, requires that the RDKit be '
-#            'uilt with InChI support).')
-#
-#    inchi_key = _RDKitFunction.define('mol_inchikey', Mol,
-#            'Returns an InChI key for the molecule. (available '
-#            'from the 2011_06 release, requires that the RDKit be '
-#            'uilt with InChI support).')
+
+    inchi = _rdkit_function(
+                'mol_inchi', 
+                Chem.MolToInchi,
+                sql_cast_out='text',
+                help='Returns an InChI for the molecule. (available '
+                     'from the 2011_06 release, requires that the RDKit be '
+                     'uilt with InChI support).')
+
+    inchi_key = _rdkit_function(
+                'mol_inchikey', 
+                lambda m: Chem.InchiToInchiKey(Chem.MolToInchi(m)),
+                sql_cast_out='text',
+                help='Returns an InChI key for the molecule. (available '
+                     'from the 2011_06 release, requires that the RDKit be '
+                     'uilt with InChI support).')
+
+    morgan_fp = _rdkit_function(
+                'morganbv_fp',
+                Chem.rdMolDescriptors.GetMorganFingerprintAsBitVect,
+                type_=Bfp)
+
+
+class _RDKitBfpFunctions(object):
+    size = _rdkit_function(
+                'size',
+                DataStructs.ExplicitBitVect.GetNumBits,
+                help="Returns the number of bits in a binary fingerprint")
 
 
 ## Code to handle modifying the similarity search threshold constants 
 ## Borrowed straight from RAZI
 
-def identity(x): 
-    return x
 
 class GUC(expression.Executable, expression.ClauseElement):
-    """ From: Razi """
+    """ From Razi """
 
-    def __init__(self, variable, type_=identity, *args, **kwargs):
+    def __init__(self, variable, type_=lambda x: x, 
+                       default=None, 
+                       *args, **kwargs):
         self.variable = variable
         self.type_ = type_
+        if default is not None:
+            self.set(default)
 
     def set(self, value):
         value = self.type_(value)
@@ -829,11 +1016,14 @@ class GUC(expression.Executable, expression.ClauseElement):
         return expression.text(query)
 
     @contextlib.contextmanager
-    def __call__(self, value):
+    def set_in_context(self, value):
         original = self.get()
         self.set(value)
-        yield original
+        yield
         self.set(original)
+
+    def __call__(self, value):
+        return self.set_in_context(value)
 
 
 @compiles(GUC)
