@@ -299,24 +299,38 @@ class _RDKitFunction(functions.GenericFunction):
 
 def _hybrid_function(sql_function, local_function, 
                      type_=None, 
+                     as_property=True,
                      local_in_type=None,
+                     local_kwargs=None,
+                     element_kwargs=None,
                      sql_cast_out=None,
                      help="", tpl=functions.GenericFunction,
                      register=True):
+
+    if local_kwargs is None:
+        local_kwargs = {}
+    if element_kwargs is None:
+        element_kwargs = {}
+
     attributes = {
         'name': sql_function,
         'local_function': staticmethod(local_function),
+        '_as_property': as_property,
         '_sql_cast_out': sql_cast_out,
         '_local_in_type': local_in_type,
+        '_local_kwargs': local_kwargs,
+        '_element_kwargs': element_kwargs,
     }
 
     docs = [help]
     docs.append(getattr(tpl, 'HELP', ''))
 
     if type_ is not None:
+        element = getattr(type_, 'element', None)
         type_str = ".".join((type_.__module__, type_.__name__))
         docs.append("Return Type: {type}".format(type=type_str))
         attributes['type'] = type_
+        attributes['_element'] = element
 
     attributes['__doc__'] = "\n\n".join(docs)
 
@@ -330,10 +344,14 @@ def _hybrid_function(sql_function, local_function,
 
 
 def _rdkit_function(sql_function, local_function, 
-                    type_=None, sql_cast_out=None,
+                    type_=None, as_property=True,
+                    local_in_type=None, sql_cast_out=None,
                     help="", register=True):
     return _hybrid_function(sql_function, local_function, 
-                            type_=type_, sql_cast_out=sql_cast_out,
+                            as_property=as_property, 
+                            type_=type_, 
+                            local_in_type=local_in_type, 
+                            sql_cast_out=sql_cast_out,
                             tpl=_RDKitFunction,
                             help=help, register=register)
 
@@ -342,7 +360,7 @@ def _rdkit_function(sql_function, local_function,
 def _compile_rdkit_function(element, compiler, **kwargs):
     compiled = compiler.visit_function(element)
     if element._sql_cast_out is not None:
-        compiled = "{call}::{cast}".format(call=compiled, 
+        compiled = "CAST({call} AS {cast})".format(call=compiled, 
                                            cast=element._sql_cast_out)
     return compiled
 
@@ -365,7 +383,12 @@ class _RDKitFunctionCallable(object):
         if data is None:
             data = self
         fn = self._get_function(fn_name)
-        return fn(expr=data)
+        if getattr(fn, '_as_property', True):
+            return fn(expr=data)
+        else:
+            def partial(*args):
+                return fn(expr=data, *args)
+            return partial
 
 
 def instrumented_property(name):
@@ -415,9 +438,28 @@ class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumente
                                   expression.ColumnElement)):
             return super(_RDKitDataElement, self)\
                         ._function_call(fn_name, data=self.desc)
+
         elif self._can_call_function_locally(fn_name):
-            fn = self._get_function(fn_name)()
-            return fn.local_function(self.to_local_type())
+            fn = self._get_function(fn_name)
+            local_fn = fn.local_function
+            local_data = self.to_local_type()
+            element = getattr(fn, '_element', None)
+            if element is None:
+                element = lambda x, **_: x
+
+            treat_as_property = getattr(fn, '_as_property', True)
+            local_kwargs = getattr(fn, '_local_kwargs', {})
+            element_kwargs = getattr(fn, '_element_kwargs', {})
+
+            def partial_fn(*args):
+                raw = local_fn(local_data, *args, **local_kwargs)
+                result = element(raw, **element_kwargs)
+                return result
+
+            if treat_as_property:
+                return partial_fn()
+            else:
+                return partial_fn
 
     def __getattr__(self, name):
         return self._function_call(name)
@@ -434,6 +476,15 @@ class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumente
 
     def to_local_type(self):
         raise NotImplemented
+
+    def new_with_attrs(self, data):
+        cls = type(self)
+        params = self._get_params()
+        new = cls(data, **params)
+        return new
+
+    def _get_params(self):
+        return {}
 
 
 ## Mol element interface.
@@ -459,6 +510,9 @@ class RDKitMolProperties(object):
     inchi = instrumented_property('inchi')
     inchi_key = instrumented_property('inchi_key')
 
+    rdkit_fp = instrumented_property('rdkit_fp')
+    morgan_fp = instrumented_property('morgan_fp')
+
 
 class RDKitBfpProperties(object):
     @property
@@ -466,6 +520,9 @@ class RDKitBfpProperties(object):
         return _RDKitBfpFunctions
     
     size = instrumented_property('size')
+
+    tanimoto = instrumented_property('tanimoto')
+    dice = instrumented_property('dice')
 
 
 class RawMolElement(_RDKitDataElement, RDKitMolProperties):
@@ -476,6 +533,11 @@ class RawMolElement(_RDKitDataElement, RDKitMolProperties):
         _RDKitDataElement.__init__(self, mol)
         self._mol = None
         self.force_sanitized = _force_sanitized
+
+    def _get_params(self):
+        return {
+            '_force_sanitized': self.force_sanitized,
+        }
 
     def compile_desc_literal(self):
         return self.mol_cast(self.data)
@@ -600,6 +662,12 @@ class BfpElement(_RDKitDataElement, expression.Function, RDKitBfpProperties):
         expression.Function.__init__(self, self.backend_in, self.desc,
                                            type_=Bfp(size=self._size,
                                                      method=self._method))
+
+    def _get_params(self):
+        return {
+            'size_': self._size,
+            'method_': self._method,
+        }
 
     def compile_desc_literal(self):
         return self.as_binary_text
@@ -786,7 +854,9 @@ class BinaryMol(Mol):
                                         sanitized_=sanitized_)
 
 
-class _RDKitBfpComparator(_RDKitComparator, RDKitBfpProperties):
+class _RDKitBfpComparator(_RDKitComparator,
+                          _RDKitInstrumentedFunctions,
+                          RDKitBfpProperties):
     _element = BfpElement
     default_coefficient = 'tanimoto'
 
@@ -976,10 +1046,23 @@ class _RDKitMolFunctions(object):
                      'from the 2011_06 release, requires that the RDKit be '
                      'uilt with InChI support).')
 
+    rdkit_fp = _rdkit_function(
+                'rdkit_fp',
+                Chem.RDKFingerprint,
+                as_property=True,
+                type_=Bfp)
+            
     morgan_fp = _rdkit_function(
                 'morganbv_fp',
                 Chem.rdMolDescriptors.GetMorganFingerprintAsBitVect,
+                as_property=False,  # Need to supply a radius
                 type_=Bfp)
+
+
+def _rdkit_bfp_binary_fn(fn):
+    def wrapped(a, b, *args, **kwargs):
+        return fn(coerse_to_bfp(a), coerse_to_bfp(b), *args, **kwargs)
+    return wrapped
 
 
 class _RDKitBfpFunctions(object):
@@ -987,6 +1070,16 @@ class _RDKitBfpFunctions(object):
                 'size',
                 DataStructs.ExplicitBitVect.GetNumBits,
                 help="Returns the number of bits in a binary fingerprint")
+
+    tanimoto = _rdkit_function(
+                'tanimoto_sml',
+                _rdkit_bfp_binary_fn(DataStructs.TanimotoSimilarity),
+                as_property=False)
+
+    dice = _rdkit_function(
+                'dice_sml',
+                _rdkit_bfp_binary_fn(DataStructs.DiceSimilarity),
+                as_property=False)
 
 
 ## Code to handle modifying the similarity search threshold constants 
@@ -1033,6 +1126,14 @@ def __compile_guc(element, compiler, **kwargs):
 
 tanimoto_threshold = GUC('rdkit.tanimoto_threshold', float)
 dice_threshold = GUC('rdkit.dice_threshold', float)
+
+
+class RDKitMolClass(RDKitInstrumentedColumnClass, RDKitMolProperties):
+    pass
+
+
+class RDKitBfpClass(RDKitInstrumentedColumnClass, RDKitBfpProperties):
+    pass
 
 
 ## Define the rdkit datatypes in sqlalchemy
