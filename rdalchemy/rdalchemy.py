@@ -139,12 +139,12 @@ def ensure_bfp(value, size=None):
     if not isinstance(value, DataStructs.ExplicitBitVect):
         raise ValueError("Not already a bfp (rdkit.DataStructs.ExplicitBitVect)")
     if size is not None and size != value.GetNumBits():
-        raise ValueError("BFP size does not match expected {0}".format(size))
+        raise Exception("BFP size does not match expected {0}".format(size))
     return value
 
 
 def extract_bfp_element(value, size=None):
-    if isinstance(value, BfpElement):
+    if hasattr(value, 'as_bfp'):
         value = value.as_bfp
     else:
         raise ValueError("Not already a bfp element")
@@ -165,6 +165,8 @@ def bfp_to_raw_binary_text(bfp):
     
 
 def bytes_from_binary_text(binary_text):
+    if not isinstance(binary_text, basestring):
+        raise ValueError("Binary text must be a string")
     if binary_text.startswith(r'\x'):
         binary_text = binary_text[2:]
     else:
@@ -869,7 +871,9 @@ class _RDKitBfpComparator(_RDKitComparator,
 
     def _cast_other_element(self, obj):
         if self._should_cast(obj):
-            size = getattr(self, 'size', None)
+            size = getattr(self, '_size', None) or getattr(self, 'size', None)
+            if not isinstance(size, int):
+                size = None
             method = getattr(self, 'method', None)
             other = coerse_to_bfp(obj, size=size, method=method)
         else:
@@ -878,29 +882,29 @@ class _RDKitBfpComparator(_RDKitComparator,
 
     @_RDKitComparator._ensure_other_element
     def tanimoto_similar(self, other):
-        return self % other_element
+        return self % other
     
     @_RDKitComparator._ensure_other_element
     def dice_similar(self, other):
-        return self.op('#')(other_element)
+        return self.op('#')(other)
     
     @_RDKitComparator._ensure_other_element
     def tanimoto_nearest_neighbors(self, other):
-        return self.op('<%>')(other_element)
+        return self.op('<%>')(other)
 
     @_RDKitComparator._ensure_other_element
     def dice_nearest_neighbors(self, other):
-        return self.op('<#>')(other_element)
+        return self.op('<#>')(other)
 
     def similar_to(self, other):
         coeff = self.active_coefficient
-        other_element = self._get_other_element(other)
+        other_element = self._cast_other_element(other)
         similarity_fn = "{0}_similar".format(coeff)
         return getattr(self, similarity_fn)(other_element)
 
     def most_similar(self, other):
         coeff = self.active_coefficient
-        other_element = self._get_other_element(coeff)
+        other_element = self._cast_other_element(coeff)
         similarity_fn = "{0}_nearest_neighbors".format(default)
         return getattr(self, similarity_fn)(other_element)
 
@@ -914,8 +918,8 @@ class Bfp(UserDefinedType):
     comparator_factory = _RDKitBfpComparator
     
     def __init__(self, size=None, method=None, coefficient='tanimoto'):
-        self.size = size or self.size
-        self.method = method or self.method
+        self._size = size or getattr(self, '_size', None)
+        self._method = method or getattr(self, '_method', None)
         self.coefficient = coefficient
     
     def get_col_spec(self):
@@ -923,8 +927,8 @@ class Bfp(UserDefinedType):
     
     def bind_expression(self, bindvalue):
         element = self.element(bindvalue, 
-                               size_=self.size, 
-                               method_=self.method)
+                               size_=self._size, 
+                               method_=self._method)
         return element
     
     def column_expression(self, col):
@@ -943,7 +947,8 @@ class Bfp(UserDefinedType):
     def result_processor(self, dialect, coltype):
         def process(value):
             if value is not None:
-                return self.element(value, size_=self.size)
+                return self.element(value, size_=self._size,
+                                           method_=self._method)
             else:
                 return None
         return process
