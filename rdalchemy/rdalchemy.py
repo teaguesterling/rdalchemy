@@ -16,11 +16,11 @@ import numpy as np
 from sqlalchemy import event, Table
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import expression, functions, type_coerce
-from sqlalchemy.types import UserDefinedType, _Binary, TypeDecorator
+from sqlalchemy.types import UserDefinedType, _Binary, TypeDecorator, BINARY
 from sqlalchemy.dialects.postgresql.base import ischema_names
 
 from rdkit import Chem, DataStructs
-from rdkit.Chem import Descriptors
+from rdkit.Chem import Descriptors, rdchem
 
 
 ## Datatype Converstions
@@ -32,7 +32,7 @@ from rdkit.Chem import Descriptors
 ## Mol conversions ##################################################
 
 def ensure_mol(mol, sanitize=True):
-    if not isinstance(mol, Chem.Mol):
+    if not isinstance(mol, (Chem.Mol, rdchem.Mol)):
         raise ValueError("Not already an instance of rdkit.Chem.Mol")
     if sanitize:
         Chem.SanitizeMol(mol)
@@ -147,7 +147,7 @@ def extract_bfp_element(value, size=None):
     if hasattr(value, 'as_bfp'):
         value = value.as_bfp
     else:
-        raise ValueError("Not already a bfp element")
+        raise ValueError("Not already a bfp element (or compatable)")
     if size is not None and size != value.GetNumBits():
         raise ValueError("BFP size does not match expected {0}".format(size))
     return value
@@ -257,8 +257,15 @@ def attempt_bfp_conversion(data, size=None, method=None):
 
     # Special case for mol elements
     if isinstance(data, Chem.Mol):
+        mol = data
+    elif hasattr(data, 'as_mol'):
+        mol = data.as_mol
+    else:
+        mol = None
+
+    if mol is not None:
         if method is not None:
-            data = method(data)
+            data = method(mol)
         else:
             raise ValueError("Attempting to generate bfp from Mol "
                              "but no method provided")
@@ -277,7 +284,7 @@ def attempt_bfp_conversion(data, size=None, method=None):
     raise ValueError("Failed to convert `{0}` to bfp. Errors were: {1}".format(data, ", ".join(errors)))
     
 def coerse_to_bfp(data, size=None, method=None):
-    fmt, bfp = attempt_bfp_conversion(data, size=size, method=None)
+    fmt, bfp = attempt_bfp_conversion(data, size=size, method=method)
     return bfp
 
 
@@ -418,10 +425,9 @@ class RDKitInstrumentedColumnClass(object):
 class _RDKitElement(object):
 
     def __str__(self):
-        return self.desc
+        return str(self.desc)
     def __repr__(self):
-        return "<%s at 0x%x; %r>" % (self.__class__.__name__,
-                                        id(self), self.desc)
+        return "<{0} at {1}; {2!r}>".format(self.__class__.__name__, id(self), self.desc)
 
 
 class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumentedFunctions):
@@ -465,7 +471,7 @@ class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumente
 
     def __getattr__(self, name):
         return self._function_call(name)
-        
+
     @property
     def desc(self):
         if isinstance(self.data, expression.BindParameter):
@@ -478,6 +484,10 @@ class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumente
 
     def to_local_type(self):
         raise NotImplemented
+
+    @property
+    def as_local(self):
+        return self.as_local
 
     def new_with_attrs(self, data):
         cls = type(self)
@@ -510,7 +520,7 @@ class RDKitMolProperties(object):
     num_hetero_atoms = instrumented_property('num_hetero_atoms')
     num_rings = instrumented_property('num_rings')
     inchi = instrumented_property('inchi')
-    inchi_key = instrumented_property('inchi_key')
+    inchikey = instrumented_property('inchikey')
 
     rdkit_fp = instrumented_property('rdkit_fp')
     morgan_fp = instrumented_property('morgan_fp')
@@ -560,8 +570,8 @@ class RawMolElement(_RDKitDataElement, RDKitMolProperties):
         return self._mol
     
     @property
-    def as_binary(self):
-        return self.as_mol.ToBinary()
+    def as_binary(self): 
+        return buffer(self.as_mol.ToBinary())
     
     @property
     def as_smiles(self):
@@ -617,8 +627,16 @@ class BinaryMolElement(_ExplicitMolElement):
     backend_out = 'mol_to_pkl'
     frontend_coerse = 'binary'
 
+    def __init__(self, mol, _force_sanitized=True):
+        if isinstance(mol, basestring):
+            mol = bytes(mol)
+        super(BinaryMolElement, self).__init__(mol, _force_sanitized=_force_sanitized)
+
     def compile_desc_literal(self):
         return self.as_binary
+
+    def __repr__(self):
+        return "<{0}; <{2}>>".format('BinaryMolElement', id(self), self.as_smiles)
     
 
 class SmartsMolElement(_ExplicitMolElement):   
@@ -656,19 +674,19 @@ class BfpElement(_RDKitDataElement, expression.Function, RDKitBfpProperties):
     backend_in = 'bfp_from_binary_text'
     backend_out = 'bfp_to_binary_text'
 
-    def __init__(self, fp, size_=None, method_=None):
+    def __init__(self, fp, size=None, method=None):
         _RDKitDataElement.__init__(self, fp)
-        self._size = size_
-        self._method = method_
+        self._size = size
+        self._method = method
         self._fp = None
         expression.Function.__init__(self, self.backend_in, self.desc,
-                                           type_=Bfp(size=self._size,
+                                           type_=Bfp(bits=self._size,
                                                      method=self._method))
 
     def _get_params(self):
         return {
-            'size_': self._size,
-            'method_': self._method,
+            'size': self._size,
+            'method': self._method,
         }
 
     def compile_desc_literal(self):
@@ -871,14 +889,25 @@ class _RDKitBfpComparator(_RDKitComparator,
 
     def _cast_other_element(self, obj):
         if self._should_cast(obj):
-            size = getattr(self, '_size', None) or getattr(self, 'size', None)
-            if not isinstance(size, int):
-                size = None
-            method = getattr(self, 'method', None)
+            try:
+                size = self.type.bits
+            except AttributeError:
+                try:
+                    size = getattr(self, '_size')
+                except AttributeError:
+                    size = None
+            try:
+                method = self.type.method
+            except AttributeError:
+                try:
+                    method = getattr(self, '_method')
+                except AttributeError:
+                    method = None
             other = coerse_to_bfp(obj, size=size, method=method)
+            element = self._element(other)
         else:
-            other = obj
-        return other
+            element = obj
+        return element
 
     @_RDKitComparator._ensure_other_element
     def tanimoto_similar(self, other):
@@ -912,14 +941,14 @@ class _RDKitBfpComparator(_RDKitComparator,
 class Bfp(UserDefinedType):
     name = 'bfp'
     element = BfpElement
-    size = None
+    bits = None
     method = None
 
     comparator_factory = _RDKitBfpComparator
     
-    def __init__(self, size=None, method=None, coefficient='tanimoto'):
-        self._size = size or getattr(self, '_size', None)
-        self._method = method or getattr(self, '_method', None)
+    def __init__(self, bits=None, method=None, coefficient='tanimoto'):
+        self.bits = bits or getattr(self, 'bits', None)
+        self.method = method or getattr(self, 'method', None)
         self.coefficient = coefficient
     
     def get_col_spec(self):
@@ -927,8 +956,8 @@ class Bfp(UserDefinedType):
     
     def bind_expression(self, bindvalue):
         element = self.element(bindvalue, 
-                               size_=self._size, 
-                               method_=self._method)
+                               size=self.bits, 
+                               method=self.method)
         return element
     
     def column_expression(self, col):
@@ -947,8 +976,8 @@ class Bfp(UserDefinedType):
     def result_processor(self, dialect, coltype):
         def process(value):
             if value is not None:
-                return self.element(value, size_=self._size,
-                                           method_=self._method)
+                return self.element(value, size=self.bits,
+                                           method=self.method)
             else:
                 return None
         return process
@@ -1035,6 +1064,11 @@ class _RDKitMolFunctions(object):
 #    kappa1 = _rdkit_function('mol_kappa1', Mol,
 #            'Returns the kappaX value for a molecule for X=1-3')
 
+    to_pkl = _rdkit_function(
+                'mol_to_pkl',
+                Chem.Mol.ToBinary,
+                sql_cast_out='bytea')
+
     inchi = _rdkit_function(
                 'mol_inchi', 
                 Chem.MolToInchi,
@@ -1043,7 +1077,7 @@ class _RDKitMolFunctions(object):
                      'from the 2011_06 release, requires that the RDKit be '
                      'uilt with InChI support).')
 
-    inchi_key = _rdkit_function(
+    inchikey = _rdkit_function(
                 'mol_inchikey', 
                 lambda m: Chem.InchiToInchiKey(Chem.MolToInchi(m)),
                 sql_cast_out='text',
