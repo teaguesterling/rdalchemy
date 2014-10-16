@@ -13,7 +13,7 @@ Example Usage
     
     from rdkit.Chem import RDKFingerprint
     
-    from rdalchemy import (BinaryMol, Bfp, tanimoto_threshold)
+    from rdalchemy import (Mol, Bfp, tanimoto_threshold)
     
     engine = create_engine('postgresql+psycopg2://readonly:access@db/zinc', echo=True)
     metadata = MetaData(engine)
@@ -24,7 +24,7 @@ Example Usage
       __tablename__ = 'substance'
         
         sub_id = Column('sub_id', Integer, primary_key=True)
-        structure = Column('smiles', BinaryMol)
+        structure = Column('smiles', Mol)
         name = Column('name', String)
         fingerprint = Column('fp_id', ForeignKey('Fingerprint.fp_id'))
         
@@ -55,13 +55,13 @@ Example Usage
       MAX_PATH = 5
       
       @staticmethod
-      def method(mol):
+      def GENERATE_FP(mol):
         if hasattr(mol, 'as_mol'):
             mol = mol.as_mol
         return RDKFingerprint(mol, maxPath=MAX_PATH, fpSize=SIZE)
       
       fp_id = Column('fp_id', Integer, primary_key=True)
-      data = Column('data', Bfp(size=SIZE, method=method))
+      data = Column('data', Bfp(size=SIZE, method=GENERATE_FP))
       
       @property
       def as_array(self):
@@ -77,10 +77,12 @@ Example Usage
     aspirin = db.query(Substance).filter(Substance.structure==smiles).one()
     
     print aspirin.smiles
-    print aspirin.structure.as_pdb
+    print aspirin.structure.mwt
     
-    similar = db.query(Substance).join(Fingerprint)\
-                .filter(Fingerprint.similar_to(aspirin))
+    similar = db.query(Substance)\
+                .join(Fingerprint)\
+                .filter(Fingerprint.similar_to(aspirin.structure))
+                
     with tanimoto_threshold(.7):
         for similar_substance in similar:
             print similar_substance.smiles, similar_substance.sub_id
@@ -91,5 +93,5 @@ Example Usage
                 .limit(10)
     
     for substance in tenbenz:
-        print substance.sub_id, substance.smarts
+        print substance.sub_id, substance.inchikey
 ```
