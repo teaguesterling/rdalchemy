@@ -13,7 +13,7 @@ import types
 
 import numpy as np
 
-from sqlalchemy import event, Table
+from sqlalchemy import event, Table, bindparam
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import expression, functions, type_coerce
 from sqlalchemy.types import UserDefinedType, _Binary, TypeDecorator, BINARY
@@ -323,7 +323,6 @@ def _hybrid_function(sql_function, local_function,
 
     attributes = {
         'name': sql_function,
-        'local_function': staticmethod(local_function),
         '_as_property': as_property,
         '_sql_cast_out': sql_cast_out,
         '_local_in_type': local_in_type,
@@ -333,6 +332,9 @@ def _hybrid_function(sql_function, local_function,
 
     docs = [help]
     docs.append(getattr(tpl, 'HELP', ''))
+
+    if local_function is not None:
+        attributes['local_function'] = staticmethod(local_function)
 
     if type_ is not None:
         element = getattr(type_, 'element', None)
@@ -386,7 +388,8 @@ class _RDKitFunctionCallable(object):
         return fn
 
     def _can_call_function_locally(self, fn_name):
-        return hasattr(self._get_function(fn_name), 'local_function')
+        return hasattr(self._get_function(fn_name), 'local_function')\
+               and getattr(self, '_allow_local_functions', True)
 
     def _function_call(self, fn_name, data=None):
         if data is None:
@@ -443,11 +446,11 @@ class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumente
             raise ValueError("Cannot call bound RDKit function with additional data")
 
         if isinstance(self.data, (expression.BindParameter, 
-                                  expression.ColumnElement)):
+                                  expression.ColumnElement))\
+           or not self._can_call_function_locally(fn_name):
             return super(_RDKitDataElement, self)\
-                        ._function_call(fn_name, data=self.desc)
-
-        elif self._can_call_function_locally(fn_name):
+                        ._function_call(fn_name, data=self)
+        else:
             fn = self._get_function(fn_name)
             local_fn = fn.local_function
             local_data = self.to_local_type()
@@ -486,13 +489,19 @@ class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumente
         raise NotImplemented
 
     @property
-    def as_local(self):
-        return self.as_local
+    def local(self):
+        raise NotImplementedError('')
 
-    def new_with_attrs(self, data):
+    @property
+    def bind(self):
+        bound_element = self.new_with_attrs(self.data, local_functions=False)
+        return bound_element 
+
+    def new_with_attrs(self, data, local_functions=True):
         cls = type(self)
         params = self._get_params()
         new = cls(data, **params)
+        new._allow_local_functions = local_functions
         return new
 
     def _get_params(self):
@@ -739,8 +748,12 @@ class _RDKitComparator(UserDefinedType.Comparator, _RDKitFunctionCallable):
                     ._function_call(name, data=self.expr)
 
     def _should_cast(self, obj):
-        return self._element is not None\
-               and not isinstance(obj, self._element)
+        if not (self._element is None or isinstance(obj, self._element)):
+            return False
+        elif isinstance(obj, expression.BindParameter):
+            return False
+        else:
+            return True
 
     def _cast_other_element(self, obj):
         raise NotImplemented
@@ -919,7 +932,7 @@ class _RDKitBfpComparator(_RDKitComparator,
     
     @_RDKitComparator._ensure_other_element
     def tanimoto_nearest_neighbors(self, other):
-        return self.op('<%>')(other)
+        return self.op('<%%>')(other)
 
     @_RDKitComparator._ensure_other_element
     def dice_nearest_neighbors(self, other):
@@ -1036,33 +1049,33 @@ class _RDKitMolFunctions(object):
                 'mol_numrings', 
                 Descriptors.RingCount,
                 help="Returns the number of rings in a molecule")
-#    num_aromatic_rings = _rdkit_function('mol_numaromaticrings', Mol,
-#                               "Returns the number of aromatic rings "
-#                               "in a molecule")
-#    num_aliphatic_rings = _rdkit_function('mol_numaliphaticrings', Mol,
-#                               "Returns the number of aliphatic rings "
-#                               "in a molecule")
-#    num_saturated_rings = _rdkit_function('mol_numsaturatedrings', Mol,
-#                               "Returns the number of saturated rings "
-#                               "in a molecule")
-#    num_saturated_rings = _rdkit_function('mol_numsaturatedrings', Mol,
-#                               "Returns the number of saturated rings "
-#                               "in a molecule")
-#    num_aromaticheterocycles = _rdkit_function('mol_numaromaticheterocycles', Mol,
-#                               "Returns the number of aromatic heterocycles "
-#                               "in a molecule")
-#    formula = _rdkit_function('mol_formula', Mol,
-#            'Returns a string with the molecular formula. The second '
-#            'argument controls whether isotope information is '
-#            'included in the formula; the third argument controls '
-#            'whether "D" and "T" are used instead of [2H] and [3H].')
-#
-#    chi0v = _rdkit_function('mol_chi0v', Mol,
-#            'Returns the ChiVx value for a molecule for X=0-4')
-#    chi0n = _rdkit_function('mol_chi0n', Mol,
-#            'Returns the ChiVx value for a molecule for X=0-4')
-#    kappa1 = _rdkit_function('mol_kappa1', Mol,
-#            'Returns the kappaX value for a molecule for X=1-3')
+    #num_aromatic_rings = _rdkit_function('mol_numaromaticrings', Mol,
+    #                           "Returns the number of aromatic rings "
+    #                           "in a molecule")
+    #num_aliphatic_rings = _rdkit_function('mol_numaliphaticrings', Mol,
+    #                           "Returns the number of aliphatic rings "
+    #                           "in a molecule")
+    #num_saturated_rings = _rdkit_function('mol_numsaturatedrings', Mol,
+    #                           "Returns the number of saturated rings "
+    #                           "in a molecule")
+    #num_saturated_rings = _rdkit_function('mol_numsaturatedrings', Mol,
+    #                           "Returns the number of saturated rings "
+    #                           "in a molecule")
+    #num_aromaticheterocycles = _rdkit_function('mol_numaromaticheterocycles', Mol,
+    #                           "Returns the number of aromatic heterocycles "
+    #                           "in a molecule")
+    #formula = _rdkit_function('mol_formula', Mol,
+    #        'Returns a string with the molecular formula. The second '
+    #        'argument controls whether isotope information is '
+    #        'included in the formula; the third argument controls '
+    #        'whether "D" and "T" are used instead of [2H] and [3H].')
+
+    #chi0v = _rdkit_function('mol_chi0v', Mol,
+    #        'Returns the ChiVx value for a molecule for X=0-4')
+    #chi0n = _rdkit_function('mol_chi0n', Mol,
+    #        'Returns the ChiVx value for a molecule for X=0-4')
+    #kappa1 = _rdkit_function('mol_kappa1', Mol,
+    #        'Returns the kappaX value for a molecule for X=1-3')
 
     to_pkl = _rdkit_function(
                 'mol_to_pkl',
@@ -1136,26 +1149,31 @@ class GUC(expression.Executable, expression.ClauseElement):
         if default is not None:
             self.set(default)
 
-    def set(self, value):
+    def set(self, engine, value):
         value = self.type_(value)
-        query = 'SET {variable}=:value'.format(variable=self.variable)
-        xpr = expression.text(query)
-        return xpr.execution_options(autocommit=True)\
-                  .params(value=value)
+        query = 'SET {variable} TO :value'.format(variable=self.variable)
+        expr = expression.text(query)
+        preped_expr = expr.execution_options(autocommit=True)\
+                          .params(value=value)
+        engine.execute(preped_expr)
+        return preped_expr
 
-    def get(self):
-        query = 'SHOW {variable}'.format(variable=variable)
-        return expression.text(query)
+    def get(self, engine):
+        query = 'SHOW {variable}'.format(variable=self.variable)
+        expr = expression.text(query)
+        raw = engine.scalar(expr)
+        value = self.type_(raw)
+        return value
 
     @contextlib.contextmanager
-    def set_in_context(self, value):
-        original = self.get()
-        self.set(value)
+    def set_in_context(self, engine, value):
+        original = self.get(engine)
+        self.set(engine, value)
         yield
-        self.set(original)
+        self.set(engine, original)
 
-    def __call__(self, value):
-        return self.set_in_context(value)
+    def __call__(self, engine, value):
+        return self.set_in_context(engine, value)
 
 
 @compiles(GUC)
