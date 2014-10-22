@@ -1149,21 +1149,30 @@ class GUC(expression.Executable, expression.ClauseElement):
         if default is not None:
             self.set(default)
 
-    def set(self, engine, value):
+    def set_expression(self, value):
         value = self.type_(value)
         query = 'SET {variable} TO :value'.format(variable=self.variable)
         expr = expression.text(query)
         preped_expr = expr.execution_options(autocommit=True)\
                           .params(value=value)
-        engine.execute(preped_expr)
         return preped_expr
 
-    def get(self, engine):
+    def setter(self, value):
+        return lambda engine: engine.execute(self.set_expression(value))
+
+    def set(self, engine, value):
+        return self.setter(value)(engine)
+
+    def get_expression(self):
         query = 'SHOW {variable}'.format(variable=self.variable)
-        expr = expression.text(query)
-        raw = engine.scalar(expr)
-        value = self.type_(raw)
-        return value
+        expr = expression.text(query)A
+        return expr
+
+    def getter(self):
+        return lambda engine: self.type_(engine.scalar(self.get_expression()))
+
+    def get(self, engine):
+        return self.getter()(engine)
 
     @contextlib.contextmanager
     def set_in_context(self, engine, value):
