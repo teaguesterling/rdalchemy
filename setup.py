@@ -7,6 +7,7 @@ setup(name='rdalchemy',
       description='Using SQLAlchemy with chemical databases',
       packages=['rdalchemy'],
       install_requires=[
+          'psycopg2',
           'SQLAlchemy>=0.7.0',
       ],
 )
