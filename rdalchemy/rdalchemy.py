@@ -1187,7 +1187,7 @@ class GUC(expression.Executable, expression.ClauseElement):
 
     def get_expression(self):
         query = 'SHOW {variable}'.format(variable=self.variable)
-        expr = expression.text(query)A
+        expr = expression.text(query)
         return expr
 
     def getter(self):
