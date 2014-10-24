@@ -6,6 +6,7 @@
 # This implementation utilizes code and methods from Riccardo Vianello
 # as well as code structure and inspiration from geoalchemy2
 
+import base64
 import contextlib
 import functools
 import operator
@@ -159,11 +160,9 @@ def bfp_from_raw_binary_text(raw, size):
         raise ValueError("BFP size does not match expected {0}".format(size))
     return vect
 
-
 def bfp_to_raw_binary_text(bfp):
     return bfp.ToBinary()
     
-
 def bytes_from_binary_text(binary_text):
     if not isinstance(binary_text, basestring):
         raise ValueError("Binary text must be a string")
@@ -181,7 +180,6 @@ def bytes_to_binary_text(byte_values):
     binary_text = r'\x' + ''.join(hex_chars)
     return binary_text
 
-
 def bytes_from_chars(chars):
     byte_values = map(ord, chars)
     values = np.array(byte_values, dtype=np.uint8)
@@ -191,7 +189,6 @@ def bytes_to_chars(byte_values):
     char_values = map(chr, byte_values)
     chars = ''.join(char_values)
     return chars
-
 
 def bfp_from_bits(bits, size=None):
     if size is None:
@@ -207,7 +204,6 @@ def bfp_to_bits(vect):
     DataStructs.cDataStructs.ConvertToNumpyArray(vect, bits)
     return bits
 
-
 def bfp_from_bytes(fp_bytes, size=None):
     bits = np.unpackbits(fp_bytes)
     vect = bfp_from_bits(bits, size=size)
@@ -217,7 +213,6 @@ def bfp_to_bytes(vect):
     bits = bfp_to_bits(vect)
     packed = np.packbits(bits)
     return packed
-
 
 def bfp_from_chars(chars, size=None):
     byte_values = bytes_from_chars(chars)
@@ -229,7 +224,6 @@ def bfp_to_chars(vect):
     chars = bytes_to_chars(byte_values)
     return chars
 
-
 def bfp_from_binary_text(binary_text, size=None):
     byte_values = bytes_from_binary_text(binary_text)
     vect = bfp_from_bytes(byte_values, size=size)
@@ -239,6 +233,24 @@ def bfp_to_binary_text(vect):
     byte_values = bfp_to_bytes(vect)
     binary_text = bytes_to_binary_text(byte_values)
     return binary_text
+    
+def bfp_from_base64(data, altchars='+/'):
+    raw = base64.b64decode(data, altchars)
+    array = np.frombuffer(raw, dtype=np.uint8)
+    vect = bfp_from_bytes(array)
+    return vect
+
+def bfp_to_base64(vect, altchars='+/'):
+    array = bfp_to_bytes(vect)
+    raw = array.data
+    encoded = base64.b64encode(raw, altchars)
+    return encoded
+    
+def bfp_from_base64fp(data):
+    return bfp_from_base64(data, '.+')
+
+def bfp_to_base64fp(vect):
+    return bfp_to_base64(vect, '.+')
 
 BFP_PARSERS = [
     ('bfp', ensure_bfp),
@@ -248,6 +260,8 @@ BFP_PARSERS = [
     ('binary_text', bfp_from_binary_text),
     ('bits', bfp_from_bits),
     ('binary', bfp_from_raw_binary_text),
+    ('base64fp', bfp_from_base64fp),
+    ('base64', bfp_from_base64),
     # TODO: base64, etc.
 ]
 
@@ -731,6 +745,14 @@ class BfpElement(_RDKitDataElement, expression.Function, RDKitBfpProperties):
     @property
     def as_binary_text(self):
         return bfp_to_binary_text(self.as_bfp)
+        
+    @property
+    def as_base64(self):
+        return bfp_to_base64(self.as_bfp)
+        
+    @property
+    def as_base64fp(self):
+        return bfp_to_base64fp(self.as_bfp)
     
     @property
     def as_array(self):
