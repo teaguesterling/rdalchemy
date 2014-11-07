@@ -154,7 +154,7 @@ def extract_bfp_element(value, size=None):
     return value
     
 
-def bfp_from_raw_binary_text(raw, size):
+def bfp_from_raw_binary_text(raw, size=None):
     vect = DataStructs.CreateFromBinaryText(raw)
     if vect.GetNumBits() != size:
         raise ValueError("BFP size does not match expected {0}".format(size))
@@ -192,7 +192,9 @@ def bytes_to_chars(byte_values):
 
 def bfp_from_bits(bits, size=None):
     if size is None:
-        size = len(bits)
+        raise ValueError("Cannot create BFP from on-bit list without explicit size")
+    if not all(isinstance(idx, int) for idx in bits):
+        raise ValueError("Can only create BFP from collection of integers")
     vect = DataStructs.ExplicitBitVect(size)
     on_bits = np.nonzero(bits)[0]
     vect.SetBitsFromList(on_bits)
@@ -206,6 +208,8 @@ def bfp_to_bits(vect):
 
 def bfp_from_bytes(fp_bytes, size=None):
     bits = np.unpackbits(fp_bytes)
+    if size is not None and len(bits) != size:
+        raise ValueError("BFP size {0} does not match expected {1}".format(len(bits), size))
     vect = bfp_from_bits(bits, size=size)
     return vect
 
@@ -265,17 +269,23 @@ BFP_PARSERS = [
     # TODO: base64, etc.
 ]
 
-def attempt_bfp_conversion(data, size=None, method=None):
-    if isinstance(data, (basestring, buffer)):
-        data = str(data)
+def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
 
-    # Special case for mol elements
+    # Special case for mol elements (and convertable to mol)
+    mol = None
     if isinstance(data, Chem.Mol):
         mol = data
     elif hasattr(data, 'as_mol'):
         mol = data.as_mol
-    else:
-        mol = None
+    elif raw_method is not None:
+        try:
+            mol = raw_method(data)
+            return attempt_bfp_conversion(mol, size=size, method=method, raw_method=None)
+        except ValueError:
+            pass
+
+    if isinstance(data, (basestring, buffer)):
+        data = str(data)
 
     if mol is not None:
         if method is not None:
@@ -289,16 +299,16 @@ def attempt_bfp_conversion(data, size=None, method=None):
     # Try all known bfp parsers
     for fmt, parser in BFP_PARSERS:
         try:
-            mol = parser(data, size=size)
-            return fmt, mol
+            bfp = parser(data, size=size)
+            return fmt, bfp
         except ValueError as error:
             errors.append(str(error))
         except TypeError as error:
             errors.append(str(error))
     raise ValueError("Failed to convert `{0}` to bfp. Errors were: {1}".format(data, ", ".join(errors)))
     
-def coerse_to_bfp(data, size=None, method=None):
-    fmt, bfp = attempt_bfp_conversion(data, size=size, method=method)
+def coerse_to_bfp(data, size=None, method=None, raw_method=None):
+    fmt, bfp = attempt_bfp_conversion(data, size=size, method=method, raw_method=raw_method)
     return bfp
 
 
@@ -697,33 +707,37 @@ class BfpElement(_RDKitDataElement, expression.Function, RDKitBfpProperties):
     backend_in = 'bfp_from_binary_text'
     backend_out = 'bfp_to_binary_text'
 
-    def __init__(self, fp, size=None, method=None):
+    def __init__(self, fp, size=None, method=None, raw_method=None):
         _RDKitDataElement.__init__(self, fp)
         self._size = size
         self._method = method
+        self._raw_method = raw_method
         self._fp = None
         expression.Function.__init__(self, self.backend_in, self.desc,
                                            type_=Bfp(bits=self._size,
-                                                     method=self._method))
+                                                     method=self._method,
+                                                     raw_method=self._raw_method))
 
     def _get_params(self):
         return {
             'size': self._size,
             'method': self._method,
+            'raw_method': self._raw_method,
         }
 
     def compile_desc_literal(self):
         return self.as_binary_text
 
     def to_local_type(self):
-        return self.as_bfp
+        return self
     
     @property
     def as_bfp(self):
         if self._fp is None:
             self._fp = coerse_to_bfp(self.data, 
                                      size=self._size,
-                                     method=self._method)
+                                     method=self._method,
+                                     raw_method=self._raw_method)
         return self._fp
     
     @property
@@ -770,7 +784,9 @@ class _RDKitComparator(UserDefinedType.Comparator, _RDKitFunctionCallable):
                     ._function_call(name, data=self.expr)
 
     def _should_cast(self, obj):
-        if not (self._element is None or isinstance(obj, self._element)):
+        if self._element is None:
+            return False
+        elif isinstance(obj, self._element):
             return False
         elif isinstance(obj, expression.BindParameter):
             return False
@@ -913,14 +929,6 @@ class _RDKitBfpComparator(_RDKitComparator,
                           _RDKitInstrumentedFunctions,
                           RDKitBfpProperties):
     _element = BfpElement
-    default_coefficient = 'tanimoto'
-
-    @property
-    def active_coefficient(self):
-        try:
-            return self.coefficient
-        except AttributeError:
-            return self.default_coefficient
 
     def _cast_other_element(self, obj):
         if self._should_cast(obj):
@@ -938,7 +946,14 @@ class _RDKitBfpComparator(_RDKitComparator,
                     method = getattr(self, '_method')
                 except AttributeError:
                     method = None
-            other = coerse_to_bfp(obj, size=size, method=method)
+            try:
+                raw_method = self.type.raw_method
+            except AttributeError:
+                try:
+                    raw_method = getattr(self, '_raw_method')
+                except AttributeError:
+                    raw_method = None
+            other = coerse_to_bfp(obj, size=size, method=method, raw_method=raw_method)
             element = self._element(other)
         else:
             element = obj
@@ -960,31 +975,20 @@ class _RDKitBfpComparator(_RDKitComparator,
     def dice_nearest_neighbors(self, other):
         return self.op('<#>')(other)
 
-    def similar_to(self, other):
-        coeff = self.active_coefficient
-        other_element = self._cast_other_element(other)
-        similarity_fn = "{0}_similar".format(coeff)
-        return getattr(self, similarity_fn)(other_element)
-
-    def most_similar(self, other):
-        coeff = self.active_coefficient
-        other_element = self._cast_other_element(coeff)
-        similarity_fn = "{0}_nearest_neighbors".format(default)
-        return getattr(self, similarity_fn)(other_element)
-
 
 class Bfp(UserDefinedType):
     name = 'bfp'
     element = BfpElement
     bits = None
     method = None
+    raw_method = None
 
     comparator_factory = _RDKitBfpComparator
     
-    def __init__(self, bits=None, method=None, coefficient='tanimoto'):
+    def __init__(self, bits=None, method=None, raw_method=None):
         self.bits = bits or getattr(self, 'bits', None)
         self.method = method or getattr(self, 'method', None)
-        self.coefficient = coefficient
+        self.raw_method = raw_method or getattr(self, 'raw_method', None)
     
     def get_col_spec(self):
         return self.name
@@ -992,7 +996,8 @@ class Bfp(UserDefinedType):
     def bind_expression(self, bindvalue):
         element = self.element(bindvalue, 
                                size=self.bits, 
-                               method=self.method)
+                               method=self.method,
+                               raw_method=self.raw_method)
         return element
     
     def column_expression(self, col):
@@ -1012,7 +1017,8 @@ class Bfp(UserDefinedType):
         def process(value):
             if value is not None:
                 return self.element(value, size=self.bits,
-                                           method=self.method)
+                                           method=self.method,
+                                           raw_method=self.raw_method)
             else:
                 return None
         return process
@@ -1133,16 +1139,21 @@ class _RDKitMolFunctions(object):
                 type_=Bfp)
 
 
+def _rdkit_bfp_uniary_fn(fn):
+    def wrapped(a, *args, **kwargs):
+        return fn(coerse_to_bfp(a), *args, **kwargs)
+    return wrapped
+
 def _rdkit_bfp_binary_fn(fn):
     def wrapped(a, b, *args, **kwargs):
-        return fn(coerse_to_bfp(a), coerse_to_bfp(b), *args, **kwargs)
+        return fn(coerse_to_bfp(a), coerse_to_bfp(convert_to(b, a)), *args, **kwargs)
     return wrapped
 
 
 class _RDKitBfpFunctions(object):
     size = _rdkit_function(
                 'size',
-                DataStructs.ExplicitBitVect.GetNumBits,
+                _rdkit_bfp_uniary_fn(DataStructs.ExplicitBitVect.GetNumBits),
                 help="Returns the number of bits in a binary fingerprint")
 
     tanimoto = _rdkit_function(
@@ -1152,8 +1163,7 @@ class _RDKitBfpFunctions(object):
 
     dice = _rdkit_function(
                 'dice_sml',
-                _rdkit_bfp_binary_fn(DataStructs.DiceSimilarity),
-                as_property=False)
+                _rdkit_bfp_binary_fn(DataStructs.DiceSimilarity), as_property=False)
 
 
 ## Code to handle modifying the similarity search threshold constants 
@@ -1170,6 +1180,12 @@ class GUC(expression.Executable, expression.ClauseElement):
         self.type_ = type_
         if default is not None:
             self.set(default)
+
+    def set_in_session(self, value):
+        def transform(query):
+            query.session.execute(self.set_expression(value))
+            return query
+        return transform
 
     def set_expression(self, value):
         value = self.type_(value)
@@ -1222,6 +1238,19 @@ class RDKitMolClass(RDKitInstrumentedColumnClass, RDKitMolProperties):
 
 class RDKitBfpClass(RDKitInstrumentedColumnClass, RDKitBfpProperties):
     pass
+
+
+def convert_to(value, type_):
+    if hasattr(type_, 'type'):
+        type_ = type_.type
+    converter = type_.bind_expression
+    return converter(value)
+
+
+def converter_to(type_):
+    def converter(data):
+        return convert_to(data, type_)
+    return converter
 
 
 ## Define the rdkit datatypes in sqlalchemy
