@@ -1146,7 +1146,9 @@ def _rdkit_bfp_uniary_fn(fn):
 
 def _rdkit_bfp_binary_fn(fn):
     def wrapped(a, b, *args, **kwargs):
-        return fn(coerse_to_bfp(a), coerse_to_bfp(convert_to(b, a)), *args, **kwargs)
+        a_bfp = coerse_to_bfp(a)
+        b_bfp = coerse_to_bfp(convert_to(b, a))
+        return fn(a, b, *args, **kwargs)
     return wrapped
 
 
@@ -1163,7 +1165,8 @@ class _RDKitBfpFunctions(object):
 
     dice = _rdkit_function(
                 'dice_sml',
-                _rdkit_bfp_binary_fn(DataStructs.DiceSimilarity), as_property=False)
+                _rdkit_bfp_binary_fn(DataStructs.DiceSimilarity), 
+                as_property=False)
 
 
 ## Code to handle modifying the similarity search threshold constants 

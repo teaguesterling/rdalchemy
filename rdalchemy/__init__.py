@@ -4,4 +4,6 @@ from rdalchemy import (
     Bfp, 
     tanimoto_threshold,
     dice_threshold,
+    convert_to,
+    converter_to,
 )
