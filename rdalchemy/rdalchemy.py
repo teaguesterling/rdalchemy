@@ -49,6 +49,8 @@ def extract_mol_element(mol, sanitize=True):
     return mol
 
 def smiles_to_mol(smiles, sanitize=True):
+    if '.' in smiles:
+        raise ValueError("SMILES with multiple structures forbidden")
     mol = Chem.MolFromSmiles(smiles, sanitize=False)
     if mol is None:
         raise ValueError("Failed to parse SMILES: `{0}`".format(smiles))
@@ -113,7 +115,7 @@ def attempt_mol_coersion(data, sanitize=True):
             errors.append(str(error))
     raise ValueError("Failed to convert `{0}` to mol. Errors were: {1}".format(data, ", ".join(errors)))
 
-def coerse_to_mol(data, sanitize=True):
+def coerce_to_mol(data, sanitize=True):
     fmt, mol = attempt_mol_coersion(data, sanitize=sanitize)
     return mol
     
@@ -307,7 +309,7 @@ def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
             errors.append(str(error))
     raise ValueError("Failed to convert `{0}` to bfp. Errors were: {1}".format(data, ", ".join(errors)))
     
-def coerse_to_bfp(data, size=None, method=None, raw_method=None):
+def coerce_to_bfp(data, size=None, method=None, raw_method=None):
     fmt, bfp = attempt_bfp_conversion(data, size=size, method=method, raw_method=raw_method)
     return bfp
 
@@ -454,7 +456,7 @@ class _RDKitElement(object):
     def __str__(self):
         return str(self.desc)
     def __repr__(self):
-        return "<{0} at {1}; {2!r}>".format(self.__class__.__name__, id(self), self.desc)
+        return "<{0} at {1}>".format(self.__class__.__name__, id(self))
 
 
 class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumentedFunctions):
@@ -502,6 +504,7 @@ class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumente
     @property
     def desc(self):
         if isinstance(self.data, expression.BindParameter):
+            print "DATA IS BIND"
             return self.data
         else:
             return self.compile_desc_literal()
@@ -591,15 +594,19 @@ class RawMolElement(_RDKitDataElement, RDKitMolProperties):
         return self.as_mol
     
     @staticmethod
-    def mol_cast(self, value):
-        return "{data}::mol".format(data=value)
+    def mol_cast(value, qmol=False):
+        if qmol:
+           type_ = QMol
+        else:
+           type_ = Mol
+        return expression.cast(value, type_)
         
     @property
     def as_mol(self):
         # Try and convert to rdkit.Chem.Mol (if not already a Chem.Mol)
         # Cache the mol to persist props and prevent recomputation
         if self._mol is None:
-            self._mol = coerse_to_mol(self.data, sanitize=self.force_sanitized)
+            self._mol = coerce_to_mol(self.data, sanitize=self.force_sanitized)
         return self._mol
     
     @property
@@ -637,10 +644,11 @@ class RawMolElement(_RDKitDataElement, RDKitMolProperties):
 
 class _ExplicitMolElement(RawMolElement, expression.Function):
     """ Define a mol that expects a specific IO format """
+
     def __init__(self, mol, _force_sanitized=True):        
         RawMolElement.__init__(self, mol, _force_sanitized)
         expression.Function.__init__(self, self.backend_in, self.desc,
-                                           type_=Mol(coerse_=self.frontend_coerse))
+                                           type_=Mol(coerce_=self.frontend_coerce))
         
     @property
     def backend_in(self): 
@@ -651,14 +659,14 @@ class _ExplicitMolElement(RawMolElement, expression.Function):
         raise NotImplemented
     
     @property
-    def frontend_coerse(self): 
+    def frontend_coerce(self): 
         raise NotImplemented
         
 
 class BinaryMolElement(_ExplicitMolElement):   
     backend_in = 'mol_from_pkl'
     backend_out = 'mol_to_pkl'
-    frontend_coerse = 'binary'
+    frontend_coerce = 'binary'
 
     def __init__(self, mol, _force_sanitized=True):
         if isinstance(mol, basestring):
@@ -668,23 +676,30 @@ class BinaryMolElement(_ExplicitMolElement):
     def compile_desc_literal(self):
         return self.as_binary
 
+    def __str__(self):
+        return "<Binary {}>".format(self.as_smiles)
+
     def __repr__(self):
         return "<{0}; <{2}>>".format('BinaryMolElement', id(self), self.as_smiles)
     
 
-class SmartsMolElement(_ExplicitMolElement):   
+class SmartsMolElement(RawMolElement):
     backend_in = 'mol_from_smarts'
     backend_out = 'mol_to_smarts'
-    frontend_coerse = 'smarts'
-    
+    frontend_coerce = 'smarts'
+
+    @property
+    def _force_sql_type(self):
+        return QMol
+
     def compile_desc_literal(self):
-        return self.as_smarts
+        return self.mol_cast(self.as_smarts, qmol=True)
     
     
 class SmilesMolElement(_ExplicitMolElement):   
     backend_in = 'mol_from_smiles'
     backend_out = 'mol_to_smiles'
-    frontend_coerse = 'smiles'
+    frontend_coerce = 'smiles'
     
     def compile_desc_literal(self):
         return self.as_smiles
@@ -692,7 +707,7 @@ class SmilesMolElement(_ExplicitMolElement):
 class CtabMolElement(_ExplicitMolElement):
     backend_in = 'mol_from_ctab'
     backend_out = 'mol_to_ctab'
-    frontend_coerse = 'ctab'
+    frontend_coerce = 'ctab'
     
     def compile_desc_literal(self):
         return self.as_ctab
@@ -734,7 +749,7 @@ class BfpElement(_RDKitDataElement, expression.Function, RDKitBfpProperties):
     @property
     def as_bfp(self):
         if self._fp is None:
-            self._fp = coerse_to_bfp(self.data, 
+            self._fp = coerce_to_bfp(self.data, 
                                      size=self._size,
                                      method=self._method,
                                      raw_method=self._raw_method)
@@ -801,7 +816,8 @@ class _RDKitComparator(UserDefinedType.Comparator, _RDKitFunctionCallable):
         @functools.wraps(fn)
         def wrapper(self, other):
             other = self._cast_other_element(other)
-            return fn(self, other)
+            bound_clause = fn(self, other)
+            return bound_clause
         return wrapper
 
 
@@ -830,9 +846,13 @@ class _RDKitMolComparator(_RDKitComparator,
 
     def _cast_other_element(self, obj):
         if self._should_cast(obj):
+            #print "CASTING"
             fmt = infer_mol_format(obj, sanitize=self._sanitize)
+            #print "TO", fmt
             convert = self.COERSIONS.get(fmt, RawMolElement)
+           # print "USING", convert
             other = convert(obj, _force_sanitized=self._sanitize)
+            #print "CREATED", other
         else:
             other = obj
         return other
@@ -870,47 +890,56 @@ class _RDKitMolComparator(_RDKitComparator,
 
 class Mol(UserDefinedType):
     name = 'mol'
-    
-    def __init__(self, coerse_='smiles', sanitized_=True):
-        self.coerse = coerse_
+    default_element = RawMolElement
+    base_element = RawMolElement
+
+    def __init__(self, coerce_='smiles', sanitized_=True):
+        self.coerce = coerce_
         self.sanitized = sanitized_
 
     comparator_factory = _RDKitMolComparator
 
-    def _coerse_compared_value(self, op, value):
+    def _coerce_compared_value(self, op, value):
         return self
     
-    def _get_coersed_element(self, default=None):
-        return self.comparator_factory.COERSIONS.get(self.coerse, default)
+    def _get_coerced_element(self, default=None):
+        return self.comparator_factory.COERSIONS.get(self.coerce, default)
     
     def get_col_spec(self):
         return self.name
     
     def bind_expression(self, bindvalue):
-        sanitize = self.sanitized
-        element_type = self._get_coersed_element(default=RawMolElement)
-        element = element_type(bindvalue, _force_sanitized=sanitize)
-        return element
+        if isinstance(bindvalue, expression.BindParameter):
+            effective_value = bindvalue.effective_value
+            if isinstance(effective_value, RawMolElement):
+                return bindvalue.effective_value.desc
+            else:
+                return bindvalue.effective_value
+        else:
+            sanitize = self.sanitized
+            element_type = self._get_coerced_element(default=self.default_element)
+            element = element_type(bindvalue, _force_sanitized=sanitize)
+            return element
     
     def column_expression(self, col):
-        element = self._get_coersed_element()
+        element = self._get_coerced_element()
         if element is not None:
             fn_name = element.backend_out
             fn = getattr(expression.func, fn_name)
             return fn(col, type_=self)
         else:
-            return RawMolElement.mol_cast(col)
+            return self.default_element.mol_cast(col)
     
     def bind_processor(self, dialect):
         def process(value):
-            if isinstance(value, RawMolElement):
+            if isinstance(value, self.default_element):
                 return value.desc
             else:
                 return value  # This may need to do further coersion
         return process
     
     def result_processor(self, dialect, coltype):
-        element = self._get_coersed_element(default=RawMolElement)
+        element = self._get_coerced_element(default=self.default_element)
         def process(value):
             if value is not None:
                 return element(value, _force_sanitized=self.sanitized)
@@ -919,9 +948,20 @@ class Mol(UserDefinedType):
         return process
 
 
+class QMol(Mol):
+    name = 'qmol'
+    default_element = SmartsMolElement
+
+    def __init__(self, coerce_='smarts', sanitized_=True):
+        super(QMol, self).__init__(coerce_=coerce_, 
+                                        sanitized_=sanitized_)
+
+
 class BinaryMol(Mol):
-    def __init__(self, coerse_='binary', sanitized_=True):
-        super(BinaryMol, self).__init__(coerse_=coerse_, 
+    default_element = BinaryMolElement
+
+    def __init__(self, coerce_='binary', sanitized_=True):
+        super(BinaryMol, self).__init__(coerce_=coerce_, 
                                         sanitized_=sanitized_)
 
 
@@ -953,7 +993,7 @@ class _RDKitBfpComparator(_RDKitComparator,
                     raw_method = getattr(self, '_raw_method')
                 except AttributeError:
                     raw_method = None
-            other = coerse_to_bfp(obj, size=size, method=method, raw_method=raw_method)
+            other = coerce_to_bfp(obj, size=size, method=method, raw_method=raw_method)
             element = self._element(other)
         else:
             element = obj
@@ -961,7 +1001,7 @@ class _RDKitBfpComparator(_RDKitComparator,
 
     @_RDKitComparator._ensure_other_element
     def tanimoto_similar(self, other):
-        return self % other
+        return self.op('%%')(other)
     
     @_RDKitComparator._ensure_other_element
     def dice_similar(self, other):
@@ -1141,13 +1181,13 @@ class _RDKitMolFunctions(object):
 
 def _rdkit_bfp_uniary_fn(fn):
     def wrapped(a, *args, **kwargs):
-        return fn(coerse_to_bfp(a), *args, **kwargs)
+        return fn(coerce_to_bfp(a), *args, **kwargs)
     return wrapped
 
 def _rdkit_bfp_binary_fn(fn):
     def wrapped(a, b, *args, **kwargs):
-        a_bfp = coerse_to_bfp(a)
-        b_bfp = coerse_to_bfp(convert_to(b, a))
+        a_bfp = coerce_to_bfp(a)
+        b_bfp = coerce_to_bfp(convert_to(b, a))
         return fn(a, b, *args, **kwargs)
     return wrapped
 
@@ -1246,7 +1286,10 @@ class RDKitBfpClass(RDKitInstrumentedColumnClass, RDKitBfpProperties):
 def convert_to(value, type_):
     if hasattr(type_, 'type'):
         type_ = type_.type
-    converter = type_.bind_expression
+    if hasattr(value, 'force_type'):
+        converter = value.force_type.bind_expression
+    else:
+        converter = type_.bind_expression
     return converter(value)
 
 
@@ -1259,6 +1302,7 @@ def converter_to(type_):
 ## Define the rdkit datatypes in sqlalchemy
 
 ischema_names['mol'] = Mol
+ischema_names['qmol'] = QMol
 ischema_names['bfp'] = Bfp
 
 #_RDKit_Mol_Functions._inject(RawMolElement)
