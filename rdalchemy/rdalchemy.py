@@ -283,7 +283,6 @@ def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
         mol = data.as_mol
     if mol is not None:
         if method is not None:
-            print "AS MOL"
             data = method(mol)
         else:
             raise ValueError("Attempting to generate bfp from Mol "
@@ -297,10 +296,8 @@ def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
     for fmt, parser in BFP_PARSERS:
         try:
             bfp = parser(data, size=size)
-            print fmt
             return fmt, bfp
         except (ValueError, TypeError) as error:
-            print fmt, error
             errors.append(str(error))
 
     if raw_method is not None:
@@ -507,7 +504,6 @@ class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumente
     @property
     def desc(self):
         if isinstance(self.data, expression.BindParameter):
-            print "DATA IS BIND"
             return self.data
         else:
             return self.compile_desc_literal()
