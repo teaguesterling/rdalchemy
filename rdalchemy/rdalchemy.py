@@ -9,6 +9,7 @@
 import base64
 import contextlib
 import functools
+import numbers
 import operator
 import types
 
@@ -195,7 +196,7 @@ def bytes_to_chars(byte_values):
 def bfp_from_bits(bits, size=None):
     if size is None:
         raise ValueError("Cannot create BFP from on-bit list without explicit size")
-    if not all(isinstance(idx, int) for idx in bits):
+    if not all(isinstance(idx, (numbers.Integral, np.integer)) for idx in bits):
         raise ValueError("Can only create BFP from collection of integers")
     vect = DataStructs.ExplicitBitVect(size)
     on_bits = np.nonzero(bits)[0]
@@ -210,9 +211,10 @@ def bfp_to_bits(vect):
 
 def bfp_from_bytes(fp_bytes, size=None):
     bits = np.unpackbits(fp_bytes)
-    if size is not None and len(bits) != size:
+    actual_size = len(bits)
+    if size is not None and actual_size != size:
         raise ValueError("BFP size {0} does not match expected {1}".format(len(bits), size))
-    vect = bfp_from_bits(bits, size=size)
+    vect = bfp_from_bits(bits, size=actual_size)
     return vect
 
 def bfp_to_bytes(vect):
@@ -279,34 +281,35 @@ def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
         mol = data
     elif hasattr(data, 'as_mol'):
         mol = data.as_mol
-    elif raw_method is not None:
-        try:
-            mol = raw_method(data)
-            return attempt_bfp_conversion(mol, size=size, method=method, raw_method=None)
-        except ValueError:
-            pass
-
-    if isinstance(data, (basestring, buffer)):
-        data = str(data)
-
     if mol is not None:
         if method is not None:
+            print "AS MOL"
             data = method(mol)
         else:
             raise ValueError("Attempting to generate bfp from Mol "
                              "but no method provided")
-        
+    elif isinstance(data, (basestring, buffer)):
+        data = str(data)
+
     errors = []
     
     # Try all known bfp parsers
     for fmt, parser in BFP_PARSERS:
         try:
             bfp = parser(data, size=size)
+            print fmt
             return fmt, bfp
-        except ValueError as error:
+        except (ValueError, TypeError) as error:
+            print fmt, error
             errors.append(str(error))
-        except TypeError as error:
+
+    if raw_method is not None:
+        try:
+            mol = raw_method(data)
+        except (ValueError, TypeError) as error:
             errors.append(str(error))
+        else:
+            return attempt_bfp_conversion(mol, size=size, method=method)
     raise ValueError("Failed to convert `{0}` to bfp. Errors were: {1}".format(data, ", ".join(errors)))
     
 def coerce_to_bfp(data, size=None, method=None, raw_method=None):
