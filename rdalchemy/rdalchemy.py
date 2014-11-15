@@ -1191,7 +1191,7 @@ def _rdkit_bfp_binary_fn(fn):
     def wrapped(a, b, *args, **kwargs):
         a_bfp = coerce_to_bfp(a)
         b_bfp = coerce_to_bfp(convert_to(b, a))
-        return fn(a, b, *args, **kwargs)
+        return fn(a_bfp, b_bfp, *args, **kwargs)
     return wrapped
 
 
