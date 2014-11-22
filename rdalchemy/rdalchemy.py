@@ -99,7 +99,7 @@ MOL_PARSERS = [
     ('inchi', inchi_to_mol),
 ]
 
-def attempt_mol_coersion(data, sanitize=True):
+def attempt_mol_coersion(data, sanitize=True, exclude=()):
      # RDKit doesn't like Unicode
     if isinstance(data, (basestring, buffer)):
         data = str(data)
@@ -109,6 +109,9 @@ def attempt_mol_coersion(data, sanitize=True):
     
     # Try all known mol parsers
     for fmt, parser in MOL_PARSERS:
+        if fmt in exclude:
+          errors.append("Explicitly skipping {}".format(fmt))
+          continue
         try:
             mol = parser(data, sanitize=sanitize)
             return fmt, mol
@@ -116,12 +119,12 @@ def attempt_mol_coersion(data, sanitize=True):
             errors.append(str(error))
     raise ValueError("Failed to convert `{0}` to mol. Errors were: {1}".format(data, ", ".join(errors)))
 
-def coerce_to_mol(data, sanitize=True):
-    fmt, mol = attempt_mol_coersion(data, sanitize=sanitize)
+def coerce_to_mol(data, sanitize=True, exclude=()):
+    fmt, mol = attempt_mol_coersion(data, sanitize=sanitize, exclude=exclude)
     return mol
     
-def infer_mol_format(data, sanitize=True):
-    fmt, mol = attempt_mol_coersion(data, sanitize=sanitize)
+def infer_mol_format(data, sanitize=True, exclude=()):
+    fmt, mol = attempt_mol_coersion(data, sanitize=sanitize, exclude=exclude)
     return fmt
 
 
@@ -281,6 +284,12 @@ def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
         mol = data
     elif hasattr(data, 'as_mol'):
         mol = data.as_mol
+    elif raw_method is not None:
+        try:
+            mol = raw_method(data)
+        except (ValueError, TypeError) as error:
+            errors.append(str(error))
+
     if mol is not None:
         if method is not None:
             data = method(mol)
@@ -300,13 +309,6 @@ def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
         except (ValueError, TypeError) as error:
             errors.append(str(error))
 
-    if raw_method is not None:
-        try:
-            mol = raw_method(data)
-        except (ValueError, TypeError) as error:
-            errors.append(str(error))
-        else:
-            return attempt_bfp_conversion(mol, size=size, method=method)
     raise ValueError("Failed to convert `{0}` to bfp. Errors were: {1}".format(data, ", ".join(errors)))
     
 def coerce_to_bfp(data, size=None, method=None, raw_method=None):
@@ -1185,6 +1187,7 @@ def _rdkit_bfp_uniary_fn(fn):
 
 def _rdkit_bfp_binary_fn(fn):
     def wrapped(a, b, *args, **kwargs):
+        print 'wrapped'
         a_bfp = coerce_to_bfp(a)
         b_bfp = coerce_to_bfp(convert_to(b, a))
         return fn(a_bfp, b_bfp, *args, **kwargs)
@@ -1282,7 +1285,7 @@ class RDKitBfpClass(RDKitInstrumentedColumnClass, RDKitBfpProperties):
     pass
 
 
-def convert_to(value, type_):
+def convert_to(value, type_, **kwargs):
     if hasattr(type_, 'type'):
         type_ = type_.type
     if hasattr(value, 'force_type'):
@@ -1292,9 +1295,9 @@ def convert_to(value, type_):
     return converter(value)
 
 
-def converter_to(type_):
+def converter_to(type_, **kwargs):
     def converter(data):
-        return convert_to(data, type_)
+        return convert_to(data, type_, **kwargs)
     return converter
 
 
