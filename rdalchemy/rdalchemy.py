@@ -11,6 +11,7 @@ import contextlib
 import functools
 import numbers
 import operator
+import string
 import types
 
 import numpy as np
@@ -23,6 +24,13 @@ from sqlalchemy.dialects.postgresql.base import ischema_names
 
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Descriptors, rdchem
+from rdkit.Chem.Draw import MolToImage
+
+_all_bytes = string.maketrans('', '')
+
+
+def _remove_control_characters(data):
+    return data.translate(_all_bytes, _all_bytes[:32])
 
 
 ## Datatype Converstions
@@ -41,17 +49,18 @@ def ensure_mol(mol, sanitize=True):
     return mol
 
 def extract_mol_element(mol, sanitize=True):
-    if isinstance(mol, RawMolElement):
+    if hasattr(mol, 'as_mol'):
         mol = mol.as_mol
+    elif hasattr(mol, 'mol'):
+        mol = mol.mol
     else:
-        raise ValueError("Not an instance of RawMolElement")
+        raise ValueError("Not an instance of RawMolElement or compatible")
     if sanitize:
         Chem.SanitizeMol(mol)
     return mol
 
 def smiles_to_mol(smiles, sanitize=True):
-    if '.' in smiles:
-        raise ValueError("SMILES with multiple structures forbidden")
+    smiles = _remove_control_characters(smiles)
     mol = Chem.MolFromSmiles(smiles, sanitize=False)
     if mol is None:
         raise ValueError("Failed to parse SMILES: `{0}`".format(smiles))
@@ -60,6 +69,7 @@ def smiles_to_mol(smiles, sanitize=True):
     return mol
 
 def smarts_to_mol(smarts, sanitize=True):
+    smiles = _remove_control_characters(smarts)
     mol = Chem.MolFromSmarts(smarts)
     if mol is None:
         raise ValueError("Failed to parse SMARTS: `{0}`".format(smarts))
@@ -77,12 +87,14 @@ def binary_to_mol(data, sanitize=True):
     return mol
 
 def ctab_to_mol(data, sanitize=True):
+    smiles = _remove_control_characters(data)
     mol = Chem.MolFromMolBlock(data, sanitize=sanitize, removeHs=sanitize)
     if mol is None:
         raise ValueError("Failed to parse CTAB")
     return mol
 
 def inchi_to_mol(inchi, sanitize=True):
+    smiles = _remove_control_characters(inchi)
     mol = Chem.MolFromInchi(inchi, sanitize=sanitize, removeHs=sanitize)
     if mol is None:
         raise ValueError("Failed to parse InChI: `{0}`".format(inchi))
@@ -245,10 +257,10 @@ def bfp_to_binary_text(vect):
     binary_text = bytes_to_binary_text(byte_values)
     return binary_text
     
-def bfp_from_base64(data, altchars='+/'):
+def bfp_from_base64(data, size=None, altchars='+/'):
     raw = base64.b64decode(data, altchars)
     array = np.frombuffer(raw, dtype=np.uint8)
-    vect = bfp_from_bytes(array)
+    vect = bfp_from_bytes(array, size=size)
     return vect
 
 def bfp_to_base64(vect, altchars='+/'):
@@ -257,8 +269,8 @@ def bfp_to_base64(vect, altchars='+/'):
     encoded = base64.b64encode(raw, altchars)
     return encoded
     
-def bfp_from_base64fp(data):
-    return bfp_from_base64(data, '.+')
+def bfp_from_base64fp(data, size=None):
+    return bfp_from_base64(data, size=size, altchars='.+')
 
 def bfp_to_base64fp(vect):
     return bfp_to_base64(vect, '.+')
@@ -277,6 +289,7 @@ BFP_PARSERS = [
 ]
 
 def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
+    errors = []
 
     # Special case for mol elements (and convertable to mol)
     mol = None
@@ -284,7 +297,7 @@ def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
         mol = data
     elif hasattr(data, 'as_mol'):
         mol = data.as_mol
-    elif raw_method is not None:
+    elif raw_method is not None and '\x00' not in data:
         try:
             mol = raw_method(data)
         except (ValueError, TypeError) as error:
@@ -299,7 +312,6 @@ def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
     elif isinstance(data, (basestring, buffer)):
         data = str(data)
 
-    errors = []
     
     # Try all known bfp parsers
     for fmt, parser in BFP_PARSERS:
@@ -641,6 +653,9 @@ class RawMolElement(_RDKitDataElement, RDKitMolProperties):
     @property
     def as_inchikey(self):
         return Chem.InchiToInchiKey(self.as_inchi)
+
+    def get_image(self, *args, **options):
+        return MolToImage(self.as_mol, *args, **options)
     
 
 class _ExplicitMolElement(RawMolElement, expression.Function):
@@ -806,6 +821,8 @@ class _RDKitComparator(UserDefinedType.Comparator, _RDKitFunctionCallable):
             return False
         elif isinstance(obj, expression.BindParameter):
             return False
+        elif getattr(obj, '_element', None) == self._element:
+             return False
         else:
             return True
 
@@ -1187,7 +1204,6 @@ def _rdkit_bfp_uniary_fn(fn):
 
 def _rdkit_bfp_binary_fn(fn):
     def wrapped(a, b, *args, **kwargs):
-        print 'wrapped'
         a_bfp = coerce_to_bfp(a)
         b_bfp = coerce_to_bfp(convert_to(b, a))
         return fn(a_bfp, b_bfp, *args, **kwargs)
@@ -1236,7 +1252,7 @@ class GUC(expression.Executable, expression.ClauseElement):
         value = self.type_(value)
         query = 'SET {variable} TO :value'.format(variable=self.variable)
         expr = expression.text(query)
-        preped_expr = expr.execution_options(autocommit=True)\
+        preped_expr = expr.execution_options(autocommit=False)\
                           .params(value=value)
         return preped_expr
 
@@ -1287,6 +1303,8 @@ class RDKitBfpClass(RDKitInstrumentedColumnClass, RDKitBfpProperties):
 
 def convert_to(value, type_, **kwargs):
     if hasattr(type_, 'type'):
+        type_ = type_.type
+    elif hasattr(type_, 'python_type'):
         type_ = type_.type
     if hasattr(value, 'force_type'):
         converter = value.force_type.bind_expression
