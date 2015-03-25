@@ -18,7 +18,7 @@ import numpy as np
 
 from sqlalchemy import event, Table, bindparam
 from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.sql import expression, functions, type_coerce
+from sqlalchemy.sql import expression, functions, type_coerce, elements
 from sqlalchemy.types import UserDefinedType, _Binary, TypeDecorator, BINARY
 from sqlalchemy.dialects.postgresql.base import ischema_names
 
@@ -80,7 +80,7 @@ def smarts_to_mol(smarts, sanitize=True):
 def binary_to_mol(data, sanitize=True):
     try:
         mol = Chem.Mol(data)
-    except RuntimeError:
+    except Exception:  # This is a proxy for Boost.Python.ArgumentError
         raise ValueError("Invalid binary mol data: `{0}`".format(data))
     if sanitize:
         Chem.SanitizeMol(mol)
@@ -293,14 +293,16 @@ def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
 
     # Special case for mol elements (and convertable to mol)
     mol = None
-    if isinstance(data, Chem.Mol):
+    if isinstance(data, DataStructs.ExplicitBitVect):
+        pass
+    elif isinstance(data, Chem.Mol):
         mol = data
     elif hasattr(data, 'as_mol'):
         mol = data.as_mol
-    elif raw_method is not None and '\x00' not in data:
+    elif raw_method is not None and isinstance(data, basestring) and '\x00' not in data:
         try:
             mol = raw_method(data)
-        except (ValueError, TypeError) as error:
+        except (ValueError, TypeError, AttributeError) as error:
             errors.append(str(error))
 
     if mol is not None:
@@ -350,6 +352,7 @@ def _hybrid_function(sql_function, local_function,
                      type_=None, 
                      as_property=True,
                      local_in_type=None,
+                     args_in_types=None,
                      local_kwargs=None,
                      element_kwargs=None,
                      sql_cast_out=None,
@@ -366,6 +369,7 @@ def _hybrid_function(sql_function, local_function,
         '_as_property': as_property,
         '_sql_cast_out': sql_cast_out,
         '_local_in_type': local_in_type,
+        '_args_in_types': args_in_types,
         '_local_kwargs': local_kwargs,
         '_element_kwargs': element_kwargs,
     }
@@ -397,19 +401,45 @@ def _hybrid_function(sql_function, local_function,
 def _rdkit_function(sql_function, local_function, 
                     type_=None, as_property=True,
                     local_in_type=None, sql_cast_out=None,
+                    args_in_types=None,
                     help="", register=True):
     return _hybrid_function(sql_function, local_function, 
                             as_property=as_property, 
                             type_=type_, 
                             local_in_type=local_in_type, 
                             sql_cast_out=sql_cast_out,
+                            args_in_types=args_in_types,
                             tpl=_RDKitFunction,
                             help=help, register=register)
 
 
 @compiles(_RDKitFunction)
 def _compile_rdkit_function(element, compiler, **kwargs):
-    compiled = compiler.visit_function(element)
+    if element._args_in_types:
+        new_args = []
+        clauses = list(element.clauses)
+        for idx, (clause, type_) in enumerate(zip(clauses, element._args_in_types)):
+            if type_ is None:
+                new_args.append(clause)
+            else:
+                if isinstance(type_, int):
+                    tpl = clauses[type_]
+                    if hasattr(tpl, 'type'):
+                        type_ = tpl.type
+                    elif hasattr(tpl, 'type_'):
+                        type = tpl.type_
+                    else:
+                        raise ValueError("Couldn't find 'type' from argument {} ({})".format(type_, tpl))
+                expr = type_.bind_expression(clause.effective_value)
+                if hasattr(expr, 'desc'):
+                    expr = expr.desc
+                name = '_{}_dyn_{}_{}'.format(element.name, type_.name, idx)
+                expr = expression.bindparam(name, expr)
+                new_args.append(expr)
+        clauses = elements.ClauseList(*new_args)
+        compiled = "{0}({1})".format(element.name, compiler.process(clauses))
+    else:
+        compiled = compiler.visit_function(element)
     if element._sql_cast_out is not None:
         compiled = "CAST({call} AS {cast})".format(call=compiled, 
                                            cast=element._sql_cast_out)
@@ -1179,7 +1209,7 @@ class _RDKitMolFunctions(object):
     inchikey = _rdkit_function(
                 'mol_inchikey', 
                 lambda m: Chem.InchiToInchiKey(Chem.MolToInchi(m)),
-                sql_cast_out='text',
+                sql_cast_out='bpchar',
                 help='Returns an InChI key for the molecule. (available '
                      'from the 2011_06 release, requires that the RDKit be '
                      'uilt with InChI support).')
@@ -1199,13 +1229,14 @@ class _RDKitMolFunctions(object):
 
 def _rdkit_bfp_uniary_fn(fn):
     def wrapped(a, *args, **kwargs):
-        return fn(coerce_to_bfp(a), *args, **kwargs)
+        a_bfp = coerse_to_bfp(a)
+        return fn(a, *args, **kwargs)
     return wrapped
 
 def _rdkit_bfp_binary_fn(fn):
     def wrapped(a, b, *args, **kwargs):
-        a_bfp = coerce_to_bfp(a)
-        b_bfp = coerce_to_bfp(convert_to(b, a))
+        a_bfp = coerse_to_bfp(a)
+        b_bfp = coerse_to_bfp(b)
         return fn(a_bfp, b_bfp, *args, **kwargs)
     return wrapped
 
@@ -1219,11 +1250,15 @@ class _RDKitBfpFunctions(object):
     tanimoto = _rdkit_function(
                 'tanimoto_sml',
                 _rdkit_bfp_binary_fn(DataStructs.TanimotoSimilarity),
+                args_in_types=(None, 0),
+                sql_cast_out='numeric',
                 as_property=False)
 
     dice = _rdkit_function(
                 'dice_sml',
                 _rdkit_bfp_binary_fn(DataStructs.DiceSimilarity), 
+                args_in_types=(None, 0),
+                sql_cast_out='numeric',
                 as_property=False)
 
 
