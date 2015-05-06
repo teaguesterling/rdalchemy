@@ -727,6 +727,17 @@ class BinaryMolElement(_ExplicitMolElement):
 
     def __repr__(self):
         return "<{0}; <{2}>>".format('BinaryMolElement', id(self), self.as_smiles)
+
+    def __getstate__(self):
+        d = dict(self.__dict__)
+        d['data'] = str(d['data'])
+        del d['clause_expr']
+        return d
+
+    def __setstate__(self, d):
+        data = d['data']
+        BinaryMolElement.__init__(self, data, d['force_sanitized'])
+
     
 
 class SmartsMolElement(RawMolElement):
@@ -894,13 +905,9 @@ class _RDKitMolComparator(_RDKitComparator,
 
     def _cast_other_element(self, obj):
         if self._should_cast(obj):
-            #print "CASTING"
             fmt = infer_mol_format(obj, sanitize=self._sanitize)
-            #print "TO", fmt
             convert = self.COERSIONS.get(fmt, RawMolElement)
-           # print "USING", convert
             other = convert(obj, _force_sanitized=self._sanitize)
-            #print "CREATED", other
         else:
             other = obj
         return other
