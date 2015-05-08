@@ -20,7 +20,10 @@ from sqlalchemy import event, Table, bindparam
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import expression, functions, type_coerce, elements
 from sqlalchemy.types import UserDefinedType, _Binary, TypeDecorator, BINARY
-from sqlalchemy.dialects.postgresql.base import ischema_names
+from sqlalchemy.dialects.postgresql.base import (
+    DOUBLE_PRECISION,
+    ischema_names,
+)
 
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Descriptors, rdchem
@@ -1056,19 +1059,23 @@ class _RDKitBfpComparator(_RDKitComparator,
 
     @_RDKitComparator._ensure_other_element
     def tanimoto_similar(self, other):
-        return self.op('%%')(other)
+        return self.op('%%', is_comparison=True)(other)
     
     @_RDKitComparator._ensure_other_element
     def dice_similar(self, other):
-        return self.op('#')(other)
+        return self.op('#', is_comparison=True)(other)
     
     @_RDKitComparator._ensure_other_element
     def tanimoto_nearest_neighbors(self, other):
-        return self.op('<%%>')(other)
+        ordering = self.op('<%%>')(other)
+        ordering.type = DOUBLE_PRECISION()
+        return ordering
 
     @_RDKitComparator._ensure_other_element
     def dice_nearest_neighbors(self, other):
-        return self.op('<#>')(other)
+        ordering = self.op('<#>')(other)
+        ordering.type = DOUBLE_PRECISION()
+        return ordering
 
 
 class Bfp(UserDefinedType):
