@@ -1243,14 +1243,14 @@ class _RDKitMolFunctions(object):
 
 def _rdkit_bfp_uniary_fn(fn):
     def wrapped(a, *args, **kwargs):
-        a_bfp = coerse_to_bfp(a)
+        a_bfp = coerce_to_bfp(a)
         return fn(a, *args, **kwargs)
     return wrapped
 
 def _rdkit_bfp_binary_fn(fn):
     def wrapped(a, b, *args, **kwargs):
-        a_bfp = coerse_to_bfp(a)
-        b_bfp = coerse_to_bfp(b)
+        a_bfp = coerce_to_bfp(a)
+        b_bfp = coerce_to_bfp(b)
         return fn(a_bfp, b_bfp, *args, **kwargs)
     return wrapped
 
