@@ -214,8 +214,11 @@ def bytes_to_chars(byte_values):
 def bfp_from_bits(bits, size=None):
     if size is None:
         raise ValueError("Cannot create BFP from on-bit list without explicit size")
-    if not all(isinstance(idx, (numbers.Integral, np.integer)) for idx in bits):
-        raise ValueError("Can only create BFP from collection of integers")
+    if not all(isinstance(idx, (numbers.Integral, np.integer, int)) for idx in bits):
+        try:
+            bits = map(int, bits)
+        except ValueError:
+            raise ValueError("Can only create BFP from collection of integers")
     vect = DataStructs.ExplicitBitVect(size)
     on_bits = np.nonzero(bits)[0]
     vect.SetBitsFromList(on_bits)
@@ -231,8 +234,15 @@ def bfp_from_bytes(fp_bytes, size=None):
     bits = np.unpackbits(fp_bytes)
     actual_size = len(bits)
     if size is not None and actual_size != size:
-        raise ValueError("BFP size {0} does not match expected {1}".format(len(bits), size))
+        if actual_size % size == 0:
+            fold_factor = actual_size // size
+        else:
+            raise ValueError("BFP size {0} does not match expected {1}".format(len(bits), size))
+    else:
+        fold_factor = None
     vect = bfp_from_bits(bits, size=actual_size)
+    if fold_factor:
+        vect = DataStructs.FoldFingerprint(vect, fold_factor)
     return vect
 
 def bfp_to_bytes(vect):
@@ -271,6 +281,19 @@ def bfp_to_base64(vect, altchars='+/'):
     raw = array.data
     encoded = base64.b64encode(raw, altchars)
     return encoded
+
+def bfp_from_base64rdk(data, size=None):
+    if size is None:
+        raise ValueError("Cannot create RDKit base64 fingerprint without size")
+    bfp = DataStructs.ExplicitBitVect(size)
+    try:
+        bfp.FromBase64(data)
+    except IndexError:
+        bfp.FromBase64(data.replace(' ', '+'))
+    return bfp
+
+def bfp_to_base64rdk(vect):
+    return vect.ToBase64()
     
 def bfp_from_base64fp(data, size=None):
     return bfp_from_base64(data, size=size, altchars='.+')
@@ -286,6 +309,7 @@ BFP_PARSERS = [
     ('binary_text', bfp_from_binary_text),
     ('bits', bfp_from_bits),
     ('binary', bfp_from_raw_binary_text),
+    ('base64rdk', bfp_from_base64rdk),
     ('base64fp', bfp_from_base64fp),
     ('base64', bfp_from_base64),
     # TODO: base64, etc.
