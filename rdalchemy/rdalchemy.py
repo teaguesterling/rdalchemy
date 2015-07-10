@@ -32,6 +32,10 @@ from rdkit.Chem.Draw import MolToImage
 _all_bytes = string.maketrans('', '')
 
 
+class ChemistryError(ValueError):
+    pass
+
+
 def _remove_control_characters(data):
     return data.translate(_all_bytes, _all_bytes[:32])
 
@@ -48,7 +52,10 @@ def ensure_mol(mol, sanitize=True):
     if not isinstance(mol, (Chem.Mol, rdchem.Mol)):
         raise ValueError("Not already an instance of rdkit.Chem.Mol")
     if sanitize:
-        Chem.SanitizeMol(mol)
+        try:
+            Chem.SanitizeMol(mol)
+        except ValueError as e:
+            raise ChemistryError(str(e))
     return mol
 
 def extract_mol_element(mol, sanitize=True):
@@ -59,7 +66,10 @@ def extract_mol_element(mol, sanitize=True):
     else:
         raise ValueError("Not an instance of RawMolElement or compatible")
     if sanitize:
-        Chem.SanitizeMol(mol)
+        try:
+            Chem.SanitizeMol(mol)
+        except ValueError as e:
+            raise ChemistryError(str(e))
     return mol
 
 def smiles_to_mol(smiles, sanitize=True):
@@ -68,7 +78,10 @@ def smiles_to_mol(smiles, sanitize=True):
     if mol is None:
         raise ValueError("Failed to parse SMILES: `{0}`".format(smiles))
     if sanitize:
-        Chem.SanitizeMol(mol)
+        try:
+            Chem.SanitizeMol(mol)
+        except ValueError as e:
+            raise ChemistryError(str(e))
     return mol
 
 def smarts_to_mol(smarts, sanitize=True):
@@ -77,7 +90,10 @@ def smarts_to_mol(smarts, sanitize=True):
     if mol is None:
         raise ValueError("Failed to parse SMARTS: `{0}`".format(smarts))
     if sanitize:
-        Chem.SanitizeMol(mol)
+        try:
+            Chem.SanitizeMol(mol)
+        except ValueError as e:
+            pass
     return mol
 
 def binary_to_mol(data, sanitize=True):
@@ -86,7 +102,10 @@ def binary_to_mol(data, sanitize=True):
     except Exception:  # This is a proxy for Boost.Python.ArgumentError
         raise ValueError("Invalid binary mol data: `{0}`".format(data))
     if sanitize:
-        Chem.SanitizeMol(mol)
+        try:
+            Chem.SanitizeMol(mol)
+        except ValueError as e:
+            raise ChemistryError(str(e))
     return mol
 
 def ctab_to_mol(data, sanitize=True):
@@ -130,6 +149,9 @@ def attempt_mol_coersion(data, sanitize=True, exclude=()):
         try:
             mol = parser(data, sanitize=sanitize)
             return fmt, mol
+        except ChemistryError as error:
+            errors.append(str(error))
+            break
         except ValueError as error:
             errors.append(str(error))
     raise ValueError("Failed to convert `{0}` to mol. Errors were: {1}".format(data, ", ".join(errors)))
@@ -570,6 +592,8 @@ class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumente
                 return partial_fn
 
     def __getattr__(self, name):
+        if name == 'data':
+            raise AttributeError("Data not defined")
         return self._function_call(name)
 
     @property
@@ -928,7 +952,7 @@ class _RDKitMolComparator(_RDKitComparator,
         try:
             return self.sanitized
         except AttributeError:
-            return self.force_sanitize
+            return self.type.sanitized
 
     def _cast_other_element(self, obj):
         if self._should_cast(obj):
@@ -956,9 +980,23 @@ class _RDKitMolComparator(_RDKitComparator,
 
     def contained_in(self, other):
         return self.in_superstructure(other)
+
+    def match(self, other, escape=None):
+        other = SmartsMolElement(other, _force_sanitized=self._sanitize)
+        return self.has_substructure(other)
+
+    def matched_by(self, other, escape=None):
+        other = SmartsMolElement(other, _force_sanitized=self._sanitize)
+        return self.has_superstructure(other)
         
     def __eq__(self, other):
         return self.structure_is(other)
+   
+    def __le__(self, other):
+        return self.has_substructure(other)
+
+    def __ge__(self, other):
+        return self.has_superstructure(other)
 
     def __contains__(self, other):
         return self.has_substructure(other)
