@@ -965,15 +965,15 @@ class _RDKitMolComparator(_RDKitComparator,
 
     @_RDKitComparator._ensure_other_element
     def structure_is(self, other):
-        return self.op('@=')(other)
+        return self.op('@=', is_comparison=True)(other)
 
     @_RDKitComparator._ensure_other_element
     def has_substructure(self, other):
-        return self.op('@>')(other)
+        return self.op('@>', is_comparison=True)(other)
 
     @_RDKitComparator._ensure_other_element
     def in_superstructure(self, other):
-        return self.op('<@')(other)
+        return self.op('<@', is_comparison=True)(other)
 
     def contains(self, other, escape=None):
         return self.has_substructure(other)
@@ -989,8 +989,8 @@ class _RDKitMolComparator(_RDKitComparator,
         other = SmartsMolElement(other, _force_sanitized=self._sanitize)
         return self.has_superstructure(other)
         
-    def __eq__(self, other):
-        return self.structure_is(other)
+    #def __eq__(self, other):
+    #    return self.structure_is(other)
    
     def __le__(self, other):
         return self.has_substructure(other)
@@ -1031,7 +1031,7 @@ class Mol(UserDefinedType):
     def bind_expression(self, bindvalue):
         if isinstance(bindvalue, expression.BindParameter):
             effective_value = bindvalue.effective_value
-            if isinstance(effective_value, RawMolElement):
+            if isinstance(effective_value, RawMolElement) and False:
                 return bindvalue.effective_value.desc
             else:
                 return bindvalue.effective_value
