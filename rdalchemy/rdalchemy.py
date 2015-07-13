@@ -18,7 +18,7 @@ import numpy as np
 
 from sqlalchemy import event, Table, bindparam
 from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.sql import expression, functions, type_coerce, elements
+from sqlalchemy.sql import expression, functions, type_coerce, elements, operators
 from sqlalchemy.types import UserDefinedType, _Binary, TypeDecorator, BINARY
 from sqlalchemy.dialects.postgresql.base import (
     DOUBLE_PRECISION,
@@ -34,6 +34,44 @@ _all_bytes = string.maketrans('', '')
 
 class ChemistryError(ValueError):
     pass
+
+
+class CustomEqualityBinaryExpression_HACK(elements.BinaryExpression):
+    custom_opstrings = ()
+
+    def __bool__(self):
+        try:
+            return super(CustomEqualityBinaryExpression_HACK, self).__bool__()
+        except TypeError:
+            if self.operator.opstring in self.custom_opstrings:
+                return operators.eq(hash(self._orig[0]), hash(self._orig[1]))
+            else:
+                raise
+
+    __nonzero__ = __bool__
+
+    @classmethod
+    def _override_expr(cls, source, opstrings):
+        """Create a shallow copy of this ClauseElement.
+        This method may be used by a generative API.  Its also used as
+        part of the "deep" copy afforded by a traversal that combines
+        the _copy_internals() method.
+        """
+        c = cls.__new__(cls)
+        c.__dict__ = source.__dict__.copy()
+        elements.ClauseElement._cloned_set._reset(c)
+        elements.ColumnElement.comparator._reset(c)
+
+        # this is a marker that helps to "equate" clauses to each other
+        # when a Select returns its list of FROM clauses.  the cloning
+        # process leaves around a lot of remnants of the previous clause
+        # typically in the form of column expressions still attached to the
+        # old table.
+        c._is_clone_of = source
+
+        c.custom_opstrings = opstrings
+
+        return c
 
 
 def _remove_control_characters(data):
@@ -963,6 +1001,10 @@ class _RDKitMolComparator(_RDKitComparator,
             other = obj
         return other
 
+    #@_RDKitComparator._ensure_other_element
+    #def structure_is(self, other):
+    #    return self.operate(operators.eq, other)
+
     @_RDKitComparator._ensure_other_element
     def structure_is(self, other):
         return self.op('@=', is_comparison=True)(other)
@@ -988,10 +1030,15 @@ class _RDKitMolComparator(_RDKitComparator,
     def matched_by(self, other, escape=None):
         other = SmartsMolElement(other, _force_sanitized=self._sanitize)
         return self.has_superstructure(other)
-        
-    #def __eq__(self, other):
-    #    return self.structure_is(other)
-   
+
+    def __eq__(self, other):
+        expr = self.structure_is(other)
+        expr = CustomEqualityBinaryExpression_HACK._override_expr(expr, ('@=',))
+        return expr
+
+    def __ne__(self, other):
+        return ~self.__eq__(other)
+
     def __le__(self, other):
         return self.has_substructure(other)
 
