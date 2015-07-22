@@ -28,6 +28,7 @@ from sqlalchemy.dialects.postgresql.base import (
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Descriptors, rdchem
 from rdkit.Chem.Draw import MolToImage
+from rdkit.Chem.rdDistGeom import EmbedMolecule
 
 _all_bytes = string.maketrans('', '')
 
@@ -75,6 +76,8 @@ class CustomEqualityBinaryExpression_HACK(elements.BinaryExpression):
 
 
 def _remove_control_characters(data):
+    if not isinstance(data, basestring):
+        raise ValueError("Data must be a string")
     return data.translate(_all_bytes, _all_bytes[:32])
 
 
@@ -386,6 +389,8 @@ def attempt_bfp_conversion(data, size=None, method=None, raw_method=None):
         mol = data
     elif hasattr(data, 'as_mol'):
         mol = data.as_mol
+    elif hasattr(data, 'mol'):
+        mol = data.mol
     elif raw_method is not None and isinstance(data, basestring) and '\x00' not in data:
         try:
             mol = raw_method(data)
@@ -687,6 +692,9 @@ class RDKitMolProperties(object):
     num_rotatable_bonds = instrumented_property('num_rotatable_bonds')
     num_hetero_atoms = instrumented_property('num_hetero_atoms')
     num_rings = instrumented_property('num_rings')
+    num_aromatic_rings = instrumented_property('num_aromatic_rings')
+    num_aliphatic_rings = instrumented_property('num_aliphatic_rings')
+    fractioncsp3 = instrumented_property('fractioncsp3')
     inchi = instrumented_property('inchi')
     inchikey = instrumented_property('inchikey')
 
@@ -724,6 +732,22 @@ class RawMolElement(_RDKitDataElement, RDKitMolProperties):
 
     def to_local_type(self):
         return self.as_mol
+
+    def embed_mol_2d(self):
+        mol = self.as_mol
+        if mol.GetNumConformers() == 0:
+            mol.Compute2DCoords()
+            return True
+        else:
+            return False
+
+    def embed_mol_3d(self):
+        mol = self.as_mol
+        if mol.GetNumConformers() == 0 or not mol.GetConformer().Is3D():
+            EmbedMolecule(mol)
+            return True
+        else:
+            return False
     
     @staticmethod
     def mol_cast(value, qmol=False):
@@ -740,6 +764,16 @@ class RawMolElement(_RDKitDataElement, RDKitMolProperties):
         if self._mol is None:
             self._mol = coerce_to_mol(self.data, sanitize=self.force_sanitized)
         return self._mol
+
+    @property
+    def as_mol2d(self):
+        self.embed_mol_2d()
+        return self.as_mol
+
+    @property
+    def as_mol3d(self):
+        self.embed_mol_3d()
+        return self.as_mol
     
     @property
     def as_binary(self): 
@@ -748,6 +782,10 @@ class RawMolElement(_RDKitDataElement, RDKitMolProperties):
     @property
     def as_smiles(self):
         return Chem.MolToSmiles(self.as_mol, isomericSmiles=True)
+
+    @property
+    def as_flat_smiles(self):
+        return Chem.MolToSmiles(self.as_mol, isomericSmiles=False)
     
     @property
     def as_smarts(self):
@@ -1059,12 +1097,11 @@ class Mol(UserDefinedType):
     name = 'mol'
     default_element = RawMolElement
     base_element = RawMolElement
+    comparator_factory = _RDKitMolComparator
 
     def __init__(self, coerce_='smiles', sanitized_=True):
         self.coerce = coerce_
         self.sanitized = sanitized_
-
-    comparator_factory = _RDKitMolComparator
 
     def _coerce_compared_value(self, op, value):
         return self
@@ -1288,33 +1325,34 @@ class _RDKitMolFunctions(object):
                 'mol_numrings', 
                 Descriptors.RingCount,
                 help="Returns the number of rings in a molecule")
-    #num_aromatic_rings = _rdkit_function('mol_numaromaticrings', Mol,
-    #                           "Returns the number of aromatic rings "
-    #                           "in a molecule")
-    #num_aliphatic_rings = _rdkit_function('mol_numaliphaticrings', Mol,
-    #                           "Returns the number of aliphatic rings "
-    #                           "in a molecule")
-    #num_saturated_rings = _rdkit_function('mol_numsaturatedrings', Mol,
-    #                           "Returns the number of saturated rings "
-    #                           "in a molecule")
-    #num_saturated_rings = _rdkit_function('mol_numsaturatedrings', Mol,
-    #                           "Returns the number of saturated rings "
-    #                           "in a molecule")
-    #num_aromaticheterocycles = _rdkit_function('mol_numaromaticheterocycles', Mol,
-    #                           "Returns the number of aromatic heterocycles "
-    #                           "in a molecule")
-    #formula = _rdkit_function('mol_formula', Mol,
-    #        'Returns a string with the molecular formula. The second '
-    #        'argument controls whether isotope information is '
-    #        'included in the formula; the third argument controls '
-    #        'whether "D" and "T" are used instead of [2H] and [3H].')
+    num_aromatic_rings = _rdkit_function(
+                'mol_numaromaticrings',
+                Descriptors.NumAromaticRings,
+                help="Returns the number of aromatic rings in a molecule")
+    num_aliphatic_rings = _rdkit_function(
+                'mol_numaliphaticrings',
+                Descriptors.NumAliphaticRings,
+                help="Returns the number of aliphatic rings in a molecule")
+    num_saturated_rings = _rdkit_function(
+                'mol_numsaturatedrings', 
+                Descriptors.NumSaturatedRings,
+                help="Returns the number of saturated rings in a molecule")
+    num_aromaticheterocycles = _rdkit_function(
+                'mol_numaromaticheterocycles',
+                Descriptors.NumAromaticHeterocycles,
+                help="Returns the number of aromatic heterocycles in a molecule")
+    formula = _rdkit_function(
+                'mol_formula', 
+                Chem.rdMolDescriptors.CalcMolFormula,
+                help='Returns a string with the molecular formula. The second '
+                     'argument controls whether isotope information is '
+                     'included in the formula; the third argument controls '
+                     'whether "D" and "T" are used instead of [2H] and [3H].')
 
-    #chi0v = _rdkit_function('mol_chi0v', Mol,
-    #        'Returns the ChiVx value for a molecule for X=0-4')
-    #chi0n = _rdkit_function('mol_chi0n', Mol,
-    #        'Returns the ChiVx value for a molecule for X=0-4')
-    #kappa1 = _rdkit_function('mol_kappa1', Mol,
-    #        'Returns the kappaX value for a molecule for X=1-3')
+    fractioncsp3 = _rdkit_function(
+                'mol_fractioncsp3',
+                Chem.rdMolDescriptors.CalcFractionCSP3,
+                help="Returns the fraction of C atoms that are SP3 hybridized")
 
     to_pkl = _rdkit_function(
                 'mol_to_pkl',
@@ -1512,7 +1550,7 @@ if __name__ == '__main__':
         @property
         def mol(self):
             return self.structure.as_mol
-        
+
         @property
         def smiles(self):
             return self.structure.as_smiles
