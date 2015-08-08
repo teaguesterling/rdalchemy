@@ -19,7 +19,16 @@ import numpy as np
 from sqlalchemy import event, Table, bindparam
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import expression, functions, type_coerce, elements, operators
-from sqlalchemy.types import UserDefinedType, _Binary, TypeDecorator, BINARY
+from sqlalchemy.types import (
+    UserDefinedType, 
+    _Binary, 
+    TypeDecorator, 
+    BINARY,
+    Float,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql.base import (
     DOUBLE_PRECISION,
     ischema_names,
@@ -127,14 +136,11 @@ def smiles_to_mol(smiles, sanitize=True):
 
 def smarts_to_mol(smarts, sanitize=True):
     smiles = _remove_control_characters(smarts)
-    mol = Chem.MolFromSmarts(smarts)
+    mol = Chem.MolFromSmarts(smarts, mergeHs=True)
     if mol is None:
         raise ValueError("Failed to parse SMARTS: `{0}`".format(smarts))
     if sanitize:
-        try:
-            Chem.SanitizeMol(mol)
-        except ValueError as e:
-            pass
+        Chem.SanitizeMol(mol, catchErrors=True)
     return mol
 
 def binary_to_mol(data, sanitize=True):
@@ -645,6 +651,13 @@ class _RDKitDataElement(_RDKitElement, _RDKitFunctionCallable, _RDKitInstrumente
             return self.data
         else:
             return self.compile_desc_literal()
+
+    def _compiler_dispatch(self, compiler, **kwargs):
+        if hasattr(self.desc, '_compiler_dispatch'):
+            return self.desc._compiler_dispatch(compiler, **kwargs)
+        else:
+            param = bindparam(key=None, value=self.desc, type_=self.type)
+            return compiler.visit_bindparam(param, **kwargs)
         
     def compile_desc_literal(self):
         raise NotImplemented
@@ -871,6 +884,17 @@ class SmartsMolElement(RawMolElement):
     backend_in = 'mol_from_smarts'
     backend_out = 'mol_to_smarts'
     frontend_coerce = 'smarts'
+
+    @property
+    def as_mol(self):
+        # Try and convert to rdkit.Chem.Mol (if not already a Chem.Mol)
+        # Cache the mol to persist props and prevent recomputation
+        if self._mol is None:
+            try:
+                self._mol = smarts_to_mol(self.data, sanitize=self.force_sanitized)
+            except ValueError:
+                self._mol = coerce_to_mol(self.data, sanitize=self.force_sanitized)
+        return self._mol
 
     @property
     def _force_sql_type(self):
@@ -1285,65 +1309,80 @@ class _RDKitMolFunctions(object):
     mwt = _rdkit_function(
                 'mol_amw', 
                 Descriptors.MolWt,
+                type_=Float,
                 help="Returns the AMW for a molecule.")
     logp = _rdkit_function(
                 'mol_logp', 
                 Descriptors.MolLogP,
+                type_=Float,
                 help="Returns the LogP for a molecule.")
     tpsa = _rdkit_function(
                 'mol_tpsa', 
                 Descriptors.TPSA,
+                type_=Float,
                 help="Returns the topological polar surface  area for a "
                      "molecule.")
     hba = _rdkit_function(
                 'mol_hba', 
                 Descriptors.NumHAcceptors,
+                type_=Integer,
                 help="Returns the number of Lipinski H-bond acceptors for a "
                      "molecule")
     hbd = _rdkit_function(
                 'mol_hbd', 
                 Descriptors.NumHDonors,
+                type_=Integer,
                 help="Returns the number of Lipinski H-bond donors for a "
                      "molecule")
     num_atoms = _rdkit_function(
                 'mol_numatoms', 
                 Chem.Mol.GetNumAtoms,
+                type_=Integer,
                 help="Returns the number of atoms in a molecule")
     num_heavy_atoms = _rdkit_function(
                 'mol_numheavyatoms', 
                 Chem.Mol.GetNumHeavyAtoms,
+                type_=Integer,
                 help="Returns the number of heavy atoms in a molecule")
     num_rotatable_bonds = _rdkit_function(
                 'mol_numrotatablebonds', 
                 Descriptors.NumRotatableBonds,
+                type_=Integer,
                 help="Returns the number of rotatable bonds in a molecule")
     num_hetero_atoms = _rdkit_function(
                 'mol_numheteroatoms', 
                 Descriptors.NumHeteroatoms,
+                type_=Integer,
                 help="Returns the number of heteroatoms in a molecule")
     num_rings = _rdkit_function(
                 'mol_numrings', 
                 Descriptors.RingCount,
+                type_=Integer,
                 help="Returns the number of rings in a molecule")
     num_aromatic_rings = _rdkit_function(
                 'mol_numaromaticrings',
                 Descriptors.NumAromaticRings,
+                type_=Integer,
                 help="Returns the number of aromatic rings in a molecule")
     num_aliphatic_rings = _rdkit_function(
                 'mol_numaliphaticrings',
                 Descriptors.NumAliphaticRings,
+                type_=Integer,
                 help="Returns the number of aliphatic rings in a molecule")
     num_saturated_rings = _rdkit_function(
                 'mol_numsaturatedrings', 
                 Descriptors.NumSaturatedRings,
+                type_=Integer,
                 help="Returns the number of saturated rings in a molecule")
     num_aromaticheterocycles = _rdkit_function(
                 'mol_numaromaticheterocycles',
                 Descriptors.NumAromaticHeterocycles,
+                type_=Integer,
                 help="Returns the number of aromatic heterocycles in a molecule")
     formula = _rdkit_function(
                 'mol_formula', 
                 Chem.rdMolDescriptors.CalcMolFormula,
+                type_=String,
                 help='Returns a string with the molecular formula. The second '
                      'argument controls whether isotope information is '
                      'included in the formula; the third argument controls '
@@ -1352,16 +1391,19 @@ class _RDKitMolFunctions(object):
     fractioncsp3 = _rdkit_function(
                 'mol_fractioncsp3',
                 Chem.rdMolDescriptors.CalcFractionCSP3,
+                type_=Float,
                 help="Returns the fraction of C atoms that are SP3 hybridized")
 
     to_pkl = _rdkit_function(
                 'mol_to_pkl',
                 Chem.Mol.ToBinary,
+                type_=BINARY,
                 sql_cast_out='bytea')
 
     inchi = _rdkit_function(
                 'mol_inchi', 
                 Chem.MolToInchi,
+                type_=Text,
                 sql_cast_out='text',
                 help='Returns an InChI for the molecule. (available '
                      'from the 2011_06 release, requires that the RDKit be '
@@ -1370,6 +1412,7 @@ class _RDKitMolFunctions(object):
     inchikey = _rdkit_function(
                 'mol_inchikey', 
                 lambda m: Chem.InchiToInchiKey(Chem.MolToInchi(m)),
+                type_=String,
                 sql_cast_out='bpchar',
                 help='Returns an InChI key for the molecule. (available '
                      'from the 2011_06 release, requires that the RDKit be '
@@ -1406,6 +1449,7 @@ class _RDKitBfpFunctions(object):
     size = _rdkit_function(
                 'size',
                 _rdkit_bfp_uniary_fn(DataStructs.ExplicitBitVect.GetNumBits),
+                type_=Integer,
                 help="Returns the number of bits in a binary fingerprint")
 
     tanimoto = _rdkit_function(
