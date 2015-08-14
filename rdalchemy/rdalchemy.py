@@ -1139,15 +1139,13 @@ class Mol(UserDefinedType):
     def bind_expression(self, bindvalue):
         if isinstance(bindvalue, expression.BindParameter):
             effective_value = bindvalue.effective_value
-            if isinstance(effective_value, RawMolElement) and False:
-                return bindvalue.effective_value.desc
-            else:
-                return bindvalue.effective_value
-        else:
-            sanitize = self.sanitized
-            element_type = self._get_coerced_element(default=self.default_element)
-            element = element_type(bindvalue, _force_sanitized=sanitize)
-            return element
+            if isinstance(effective_value, RawMolElement):
+                value = bindvalue.effective_value.desc
+                bindvalue = expression.BindParameter(key=None, value=value, type_=Mol)
+        sanitize = self.sanitized
+        element_type = self._get_coerced_element(default=self.default_element)
+        element = element_type(bindvalue, _force_sanitized=sanitize)
+        return element
     
     def column_expression(self, col):
         element = self._get_coerced_element()
