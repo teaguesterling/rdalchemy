@@ -87,6 +87,8 @@ class CustomEqualityBinaryExpression_HACK(elements.BinaryExpression):
 def _remove_control_characters(data):
     if not isinstance(data, basestring):
         raise ValueError("Data must be a string")
+    else:
+        data = str(data)
     return data.translate(_all_bytes, _all_bytes[:32])
 
 
@@ -1137,14 +1139,19 @@ class Mol(UserDefinedType):
         return self.name
     
     def bind_expression(self, bindvalue):
+        element = None
         if isinstance(bindvalue, expression.BindParameter):
             effective_value = bindvalue.effective_value
             if isinstance(effective_value, RawMolElement):
                 value = bindvalue.effective_value.desc
-                bindvalue = expression.BindParameter(key=None, value=value, type_=Mol)
-        sanitize = self.sanitized
-        element_type = self._get_coerced_element(default=self.default_element)
-        element = element_type(bindvalue, _force_sanitized=sanitize)
+                if getattr(value, 'is_clause_element', False):
+                    element = value
+                else:
+                    bindvalue = expression.BindParameter(key=None, value=value, type_=Mol)
+        if element is None:
+            sanitize = self.sanitized
+            element_type = self._get_coerced_element(default=self.default_element)
+            element = element_type(bindvalue, _force_sanitized=sanitize)
         return element
     
     def column_expression(self, col):
