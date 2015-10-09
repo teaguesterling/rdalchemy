@@ -16,7 +16,7 @@ import types
 
 import numpy as np
 
-from sqlalchemy import event, Table, bindparam
+from sqlalchemy import event, Table, bindparam, func
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import expression, functions, type_coerce, elements, operators
 from sqlalchemy.types import (
@@ -107,7 +107,7 @@ def ensure_mol(mol, sanitize=True):
         try:
             Chem.SanitizeMol(mol)
         except ValueError as e:
-            raise ChemistryError(str(e))
+           raise ChemistryError(str(e))
     return mol
 
 def extract_mol_element(mol, sanitize=True):
@@ -342,6 +342,7 @@ def bfp_to_binary_text(vect):
     return binary_text
     
 def bfp_from_base64(data, size=None, altchars='+/'):
+    data = str(data)
     raw = base64.b64decode(data, altchars)
     array = np.frombuffer(raw, dtype=np.uint8)
     vect = bfp_from_bytes(array, size=size)
@@ -1056,10 +1057,10 @@ class _RDKitMolComparator(_RDKitComparator,
         except AttributeError:
             return self.type.sanitized
 
-    def _cast_other_element(self, obj):
+    def _cast_other_element(self, obj, cast_as=RawMolElement):
         if self._should_cast(obj):
             fmt = infer_mol_format(obj, sanitize=self._sanitize)
-            convert = self.COERSIONS.get(fmt, RawMolElement)
+            convert = self.COERSIONS.get(fmt, cast_as)
             other = convert(obj, _force_sanitized=self._sanitize)
         else:
             other = obj
@@ -1093,7 +1094,7 @@ class _RDKitMolComparator(_RDKitComparator,
 
     def matched_by(self, other, escape=None):
         other = SmartsMolElement(other, _force_sanitized=self._sanitize)
-        return self.has_superstructure(other)
+        return self.in_superstructure(other)
 
     def __eq__(self, other):
         expr = self.structure_is(other)
@@ -1185,7 +1186,7 @@ class QMol(Mol):
     name = 'qmol'
     default_element = SmartsMolElement
 
-    def __init__(self, coerce_='smarts', sanitized_=True):
+    def __init__(self, coerce_='smarts', sanitized_=False):
         super(QMol, self).__init__(coerce_=coerce_, 
                                         sanitized_=sanitized_)
 
@@ -1251,6 +1252,10 @@ class _RDKitBfpComparator(_RDKitComparator,
         ordering = self.op('<#>')(other)
         ordering.type = DOUBLE_PRECISION()
         return ordering
+
+    @_RDKitComparator._ensure_other_element
+    def __eq__(self, other):
+        return super(_RDKitBfpComparator, self).__eq__(other)
 
 
 class Bfp(UserDefinedType):
@@ -1549,8 +1554,8 @@ class RDKitBfpClass(RDKitInstrumentedColumnClass, RDKitBfpProperties):
 def convert_to(value, type_, **kwargs):
     if hasattr(type_, 'type'):
         type_ = type_.type
-    elif hasattr(type_, 'python_type'):
-        type_ = type_.type
+    #elif hasattr(type_, 'python_type'):
+    #    type_ = type_.type
     if hasattr(value, 'force_type'):
         converter = value.force_type.bind_expression
     else:
