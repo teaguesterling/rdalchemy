@@ -132,6 +132,7 @@ def smiles_to_mol(smiles, sanitize=True):
     if sanitize:
         try:
             Chem.SanitizeMol(mol)
+            Chem.AssignStereochemistry(mol)
         except ValueError as e:
             raise ChemistryError(str(e))
     return mol
@@ -143,6 +144,7 @@ def smarts_to_mol(smarts, sanitize=True):
         raise ValueError("Failed to parse SMARTS: `{0}`".format(smarts))
     if sanitize:
         Chem.SanitizeMol(mol, catchErrors=True)
+        Chem.AssignStereochemistry(mol)
     return mol
 
 def binary_to_mol(data, sanitize=True):
@@ -153,6 +155,7 @@ def binary_to_mol(data, sanitize=True):
     if sanitize:
         try:
             Chem.SanitizeMol(mol)
+            Chem.AssignStereochemistry(mol)
         except ValueError as e:
             raise ChemistryError(str(e))
     return mol
@@ -162,6 +165,12 @@ def ctab_to_mol(data, sanitize=True):
     mol = Chem.MolFromMolBlock(data, sanitize=sanitize, removeHs=sanitize)
     if mol is None:
         raise ValueError("Failed to parse CTAB")
+    if sanitize:
+        try:
+            Chem.SanitizeMol(mol)
+            Chem.AssignStereochemistry(mol)
+        except ValueError as e:
+            raise ChemistryError(str(e))
     return mol
 
 def inchi_to_mol(inchi, sanitize=True):
@@ -169,6 +178,12 @@ def inchi_to_mol(inchi, sanitize=True):
     mol = Chem.MolFromInchi(inchi, sanitize=sanitize, removeHs=sanitize)
     if mol is None:
         raise ValueError("Failed to parse InChI: `{0}`".format(inchi))
+    if sanitize:
+        try:
+            Chem.SanitizeMol(mol)
+            Chem.AssignStereochemistry(mol)
+        except ValueError as e:
+            raise ChemistryError(str(e))
     return mol
 
 # Want to maintain order
