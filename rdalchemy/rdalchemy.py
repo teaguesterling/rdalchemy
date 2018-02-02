@@ -748,14 +748,16 @@ class RawMolElement(_RDKitDataElement, RDKitMolProperties):
     """ Base mol element. Let postgres deal with it. 
         Also define explicit conversion methods for mols"""
 
-    def __init__(self, mol, _force_sanitized=True):
+    def __init__(self, mol, _force_sanitized=True, _inchi_options=''):
         _RDKitDataElement.__init__(self, mol)
         self._mol = None
         self.force_sanitized = _force_sanitized
+        self.inchi_options = _inchi_options
 
     def _get_params(self):
         return {
             '_force_sanitized': self.force_sanitized,
+            '_inchi_options': self._inchi_options
         }
 
     def compile_desc_literal(self):
@@ -836,7 +838,7 @@ class RawMolElement(_RDKitDataElement, RDKitMolProperties):
     
     @property
     def as_inchi(self):
-        return Chem.MolToInchi(self.as_mol)
+        return Chem.MolToInchi(self.as_mol, options=self.inchi_options)
     
     @property
     def as_inchikey(self):
@@ -849,8 +851,10 @@ class RawMolElement(_RDKitDataElement, RDKitMolProperties):
 class _ExplicitMolElement(RawMolElement, expression.Function):
     """ Define a mol that expects a specific IO format """
 
-    def __init__(self, mol, _force_sanitized=True):        
-        RawMolElement.__init__(self, mol, _force_sanitized)
+    def __init__(self, mol, _force_sanitized=True, _inchi_options=''):
+        RawMolElement.__init__(self, mol,
+                               _force_sanitized=_force_sanitized,
+                               _inchi_options=_inchi_options)
         expression.Function.__init__(self, self.backend_in, self.desc,
                                            type_=Mol(coerce_=self.frontend_coerce))
         
@@ -872,10 +876,12 @@ class BinaryMolElement(_ExplicitMolElement):
     backend_out = 'mol_to_pkl'
     frontend_coerce = 'binary'
 
-    def __init__(self, mol, _force_sanitized=True):
+    def __init__(self, mol, _force_sanitized=True, _inchi_options=''):
         if isinstance(mol, basestring):
             mol = bytes(mol)
-        super(BinaryMolElement, self).__init__(mol, _force_sanitized=_force_sanitized)
+        super(BinaryMolElement, self).__init__(mol,
+                                               _force_sanitized=_force_sanitized,
+                                               _inchi_options=_inchi_options)
 
     def compile_desc_literal(self):
         return self.as_binary
@@ -1054,6 +1060,7 @@ class _RDKitMolComparator(_RDKitComparator,
                           RDKitMolProperties):
     _element = RawMolElement
     force_sanitize = False
+    inchi_options = ''
 
     COERSIONS = {
         'smiles': SmilesMolElement,
@@ -1141,9 +1148,10 @@ class Mol(UserDefinedType):
     base_element = RawMolElement
     comparator_factory = _RDKitMolComparator
 
-    def __init__(self, coerce_='smiles', sanitized_=True):
+    def __init__(self, coerce_='smiles', sanitized_=True, inchi_options_=''):
         self.coerce = coerce_
         self.sanitized = sanitized_
+        self.inchi_options = inchi_options_
 
     def _coerce_compared_value(self, op, value):
         return self
@@ -1166,8 +1174,11 @@ class Mol(UserDefinedType):
                     bindvalue = expression.BindParameter(key=None, value=value, type_=Mol)
         if element is None:
             sanitize = self.sanitized
+            inchi_options = self.inchi_options
             element_type = self._get_coerced_element(default=self.default_element)
-            element = element_type(bindvalue, _force_sanitized=sanitize)
+            element = element_type(bindvalue,
+                                   _force_sanitized=sanitize,
+                                   _inchi_options=inchi_options)
         return element
     
     def column_expression(self, col):
@@ -1191,7 +1202,9 @@ class Mol(UserDefinedType):
         element = self._get_coerced_element(default=self.default_element)
         def process(value):
             if value is not None:
-                return element(value, _force_sanitized=self.sanitized)
+                return element(value,
+                               _force_sanitized=self.sanitized,
+                               _inchi_options=self.inchi_options)
             else:
                 return None
         return process
@@ -1201,17 +1214,19 @@ class QMol(Mol):
     name = 'qmol'
     default_element = SmartsMolElement
 
-    def __init__(self, coerce_='smarts', sanitized_=False):
+    def __init__(self, coerce_='smarts', sanitized_=False, inchi_options_=''):
         super(QMol, self).__init__(coerce_=coerce_, 
-                                        sanitized_=sanitized_)
+                                   sanitized_=sanitized_,
+                                   inchi_options_=inchi_options_)
 
 
 class BinaryMol(Mol):
     default_element = BinaryMolElement
 
-    def __init__(self, coerce_='binary', sanitized_=True):
+    def __init__(self, coerce_='binary', sanitized_=True, inchi_options_=''):
         super(BinaryMol, self).__init__(coerce_=coerce_, 
-                                        sanitized_=sanitized_)
+                                        sanitized_=sanitized_,
+                                        inchi_options_=inchi_options_)
 
 
 class _RDKitBfpComparator(_RDKitComparator,
@@ -1647,3 +1662,4 @@ if __name__ == '__main__':
     
     for substance in tenbenz:
         print substance.sub_id, substance.smarts
+
